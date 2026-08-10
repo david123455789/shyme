@@ -1,0 +1,6 @@
+# Archivos y credenciales locales de Apps Script / clasp
+.clasp.json
+.clasprc.json
+node_modules/
+.DS_Store
+Thumbs.db
