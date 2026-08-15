@@ -9,25 +9,35 @@ const SYHME = Object.freeze({
     BITACORA: 'BITACORA',
   }),
   ESTATUS_ACTIVO: 'ACTIVO',
+  ID_CARPETA_RAIZ_EVENTOS: '1r2vUndE43ync3fmBl9_cayv-QZ1a4YtP',
 });
 
 function onOpen() {
-  SpreadsheetApp.getUi()
-    .createMenu('Syhme')
+  try { actualizarEstatusEventos_(); } catch (e) { /* silencioso: no debe romper la apertura del archivo */ }
+
+  const ui = SpreadsheetApp.getUi();
+
+  const menuAbrir = ui.createMenu('Abrir')
+    .addItem('Catálogo de empleados', 'abrirCatalogoEmpleados')
+    .addItem('Catálogo de puestos', 'abrirCatalogoPuestos')
+    .addItem('Catálogo de clientes', 'abrirCatalogoClientes')
+    .addItem('Catálogo de eventos', 'abrirCatalogoEventos')
+    .addItem('Catálogo de cotizaciones', 'abrirCatalogoCotizaciones');
+
+  ui.createMenu('Syhme')
     .addItem('Dar de alta empleado', 'mostrarFormularioAltaEmpleado')
-    .addItem('Abrir catálogo de empleados', 'abrirCatalogoEmpleados')
     .addSeparator()
     .addItem('Administrar puestos y tarifas', 'mostrarFormularioPuestos')
-    .addItem('Abrir catálogo de puestos', 'abrirCatalogoPuestos')
     .addSeparator()
     .addItem('Administrar clientes', 'mostrarFormularioClientes')
     .addItem('Administrar eventos', 'mostrarFormularioEventos')
-    .addItem('Abrir catálogo de clientes', 'abrirCatalogoClientes')
-    .addItem('Abrir catálogo de eventos', 'abrirCatalogoEventos')
     .addSeparator()
     .addItem('Administrar cotizaciones', 'mostrarFormularioCotizaciones')
-    .addItem('Abrir catálogo de cotizaciones', 'abrirCatalogoCotizaciones')
     .addSeparator()
+    .addSubMenu(menuAbrir)
+    .addSeparator()
+    .addItem('Actualizar estatus de eventos ahora', 'actualizarEstatusEventos_')
+    .addItem('Activar actualización diaria automática', 'instalarActualizacionDiariaEventos')
     .addItem('Verificar estructura', 'verificarEstructura')
     .addToUi();
 }
@@ -292,34 +302,134 @@ function guardarClienteDesdeFormulario(datos) {
   }finally{lock.releaseLock()}
 }
 
+/* ======================= EVENTOS (estatus dinámico + carpeta Drive automática, sin columna de ID de carpeta) ======================= */
+
+function calcularEstatusEvento_(inicio, fin, hoy) {
+  hoy = hoy || new Date();
+  const aDia = (f) => new Date(f.getFullYear(), f.getMonth(), f.getDate());
+  const inicioDia = aDia(inicio);
+  const finDia = aDia(fin);
+  const hoyDia = aDia(hoy);
+
+  if (hoyDia < inicioDia) return 'CONFIRMADO';
+  if (hoyDia > finDia) return 'FINALIZADO';
+  return 'EN CURSO';
+}
+
+function obtenerCarpetaRaizEventos_() {
+  return DriveApp.getFolderById(SYHME.ID_CARPETA_RAIZ_EVENTOS);
+}
+
+function normalizarNombreCarpeta_(valor) {
+  return String(valor || '')
+    .trim()
+    .replace(/[\\/]/g, ' - ')
+    .replace(/\s+/g, ' ')
+    .substring(0, 200);
+}
+
+function crearOEncontrarCarpetaEvento_(idEvento, nombreEvento) {
+  const raiz = obtenerCarpetaRaizEventos_();
+  const nombreCarpeta = normalizarNombreCarpeta_(`${idEvento} - ${nombreEvento}`);
+  const existentes = raiz.getFoldersByName(nombreCarpeta);
+  const carpeta = existentes.hasNext() ? existentes.next() : raiz.createFolder(nombreCarpeta);
+  return carpeta.getUrl();
+}
+
+function formulaCarpeta_(url) {
+  return `=HYPERLINK("${url}","Carpeta")`;
+}
+
 function mostrarFormularioEventos() {
   const eventosJson=JSON.stringify(obtenerEventos_()).replace(/</g,'\\u003c'),clientesJson=JSON.stringify(obtenerClientes_().filter(x=>x.estatus==='ACTIVO')).replace(/</g,'\\u003c');
   if(clientesJson==='[]'){SpreadsheetApp.getUi().alert('Registra al menos un cliente activo antes de crear eventos.');return}
-  const html=HtmlService.createHtmlOutput(`<!doctype html><html><head><base target="_top"><style>${estilosFormulario_()}</style></head><body><h2>Eventos</h2><p>Crea un evento o selecciona uno para actualizarlo.</p><form id="formulario">
+  const html=HtmlService.createHtmlOutput(`<!doctype html><html><head><base target="_top"><style>${estilosFormulario_()}
+    .estatus-actual{background:#eceff1;border-radius:6px;padding:9px;font-weight:700;color:#2d516a}
+    .check-cancelar{display:flex;align-items:center;gap:8px;font-weight:400;margin-top:10px}
+    .check-cancelar input{width:auto}
+  </style></head><body><h2>Eventos</h2><p>El estatus se calcula solo según las fechas. Al crear el evento se genera automáticamente su carpeta en Drive.</p><form id="formulario">
   <label for="idEvento">Registro</label><select id="idEvento"><option value="">+ NUEVO EVENTO</option></select><label for="nombre">Nombre del evento</label><input id="nombre" maxlength="120" required>
   <label for="idCliente">Cliente</label><select id="idCliente" required></select><div class="grid"><div><label for="inicio">Fecha de inicio</label><input id="inicio" type="date" required></div><div><label for="fin">Fecha de fin</label><input id="fin" type="date" required></div></div>
-  <label for="estatus">Estatus</label><select id="estatus"><option>BORRADOR</option><option>CONFIRMADO</option><option>EN CURSO</option><option>FINALIZADO</option><option>CANCELADO</option></select>
+  <div id="bloqueEstatus" style="display:none">
+    <label>Estatus actual</label>
+    <div id="estatusActual" class="estatus-actual">—</div>
+    <label class="check-cancelar"><input type="checkbox" id="cancelar"> Cancelar este evento</label>
+  </div>
   <label for="observaciones">Observaciones</label><textarea id="observaciones" maxlength="300"></textarea><div id="mensaje"></div><div class="acciones"><button type="button" class="secundario" onclick="google.script.host.close()">Cancelar</button><button id="guardar" class="primario">Guardar evento</button></div></form>
   <script>const eventos=${eventosJson},clientes=${clientesJson},q=id=>document.getElementById(id),sel=q('idEvento'),sc=q('idCliente');clientes.forEach(x=>{const o=document.createElement('option');o.value=x.id;o.textContent=x.nombre;sc.appendChild(o)});eventos.forEach(x=>{const o=document.createElement('option');o.value=x.id;o.textContent=x.nombre+' — '+x.inicio;sel.appendChild(o)});
-  function cargar(){const x=eventos.find(v=>v.id===sel.value);q('nombre').value=x?x.nombre:'';if(x&&![...sc.options].some(o=>o.value===x.idCliente)){const o=document.createElement('option');o.value=x.idCliente;o.textContent=x.cliente+' (INACTIVO)';sc.appendChild(o)}if(x)sc.value=x.idCliente;q('inicio').value=x?x.inicio:'';q('fin').value=x?x.fin:'';q('estatus').value=x?x.estatus:'BORRADOR';q('observaciones').value=x?x.observaciones:'';q('mensaje').textContent=''}sel.onchange=cargar;cargar();
-  q('formulario').onsubmit=e=>{e.preventDefault();q('guardar').disabled=true;q('mensaje').textContent='Guardando...';google.script.run.withSuccessHandler(r=>{q('guardar').disabled=false;q('mensaje').className=r.ok?'ok':'error';q('mensaje').textContent=r.mensaje;if(r.ok)setTimeout(()=>google.script.host.close(),900)}).withFailureHandler(e=>{q('guardar').disabled=false;q('mensaje').className='error';q('mensaje').textContent=e.message||'No fue posible guardar.'}).guardarEventoDesdeFormulario({idEvento:sel.value,nombre:q('nombre').value,idCliente:sc.value,inicio:q('inicio').value,fin:q('fin').value,estatus:q('estatus').value,observaciones:q('observaciones').value})};</script></body></html>`).setWidth(540).setHeight(650);
+  function cargar(){const x=eventos.find(v=>v.id===sel.value),nuevo=!x;q('nombre').value=x?x.nombre:'';if(x&&![...sc.options].some(o=>o.value===x.idCliente)){const o=document.createElement('option');o.value=x.idCliente;o.textContent=x.cliente+' (INACTIVO)';sc.appendChild(o)}if(x)sc.value=x.idCliente;q('inicio').value=x?x.inicio:'';q('fin').value=x?x.fin:'';q('observaciones').value=x?x.observaciones:'';q('mensaje').textContent='';q('bloqueEstatus').style.display=nuevo?'none':'block';q('estatusActual').textContent=x?x.estatus:'';q('cancelar').checked=x?x.estatus==='CANCELADO':false}sel.onchange=cargar;cargar();
+  q('formulario').onsubmit=e=>{e.preventDefault();q('guardar').disabled=true;q('mensaje').textContent='Guardando...';google.script.run.withSuccessHandler(r=>{q('guardar').disabled=false;q('mensaje').className=r.ok?'ok':'error';q('mensaje').textContent=r.mensaje;if(r.ok)setTimeout(()=>google.script.host.close(),900)}).withFailureHandler(e=>{q('guardar').disabled=false;q('mensaje').className='error';q('mensaje').textContent=e.message||'No fue posible guardar.'}).guardarEventoDesdeFormulario({idEvento:sel.value,nombre:q('nombre').value,idCliente:sc.value,inicio:q('inicio').value,fin:q('fin').value,cancelar:q('cancelar').checked,observaciones:q('observaciones').value})};</script></body></html>`).setWidth(540).setHeight(650);
   SpreadsheetApp.getUi().showModalDialog(html,'Syhme');
 }
 
 function guardarEventoDesdeFormulario(datos) {
-  const id=String((datos&&datos.idEvento)||'').trim(),nombre=normalizarNombre_(datos&&datos.nombre),idCliente=String((datos&&datos.idCliente)||'').trim(),inicio=fechaDesdeIso_(datos&&datos.inicio),fin=fechaDesdeIso_(datos&&datos.fin),estatus=String((datos&&datos.estatus)||'').trim().toUpperCase(),observaciones=String((datos&&datos.observaciones)||'').trim().slice(0,300);
+  const id=String((datos&&datos.idEvento)||'').trim(),nombre=normalizarNombre_(datos&&datos.nombre),idCliente=String((datos&&datos.idCliente)||'').trim(),inicio=fechaDesdeIso_(datos&&datos.inicio),fin=fechaDesdeIso_(datos&&datos.fin),cancelar=Boolean(datos&&datos.cancelar),observaciones=String((datos&&datos.observaciones)||'').trim().slice(0,300);
   if(!nombre)return{ok:false,mensaje:'Escribe el nombre del evento.'};if(!idCliente)return{ok:false,mensaje:'Selecciona un cliente.'};if(!inicio||!fin)return{ok:false,mensaje:'Captura fechas válidas.'};if(fin<inicio)return{ok:false,mensaje:'La fecha final no puede ser anterior a la inicial.'};
-  const estados=['BORRADOR','CONFIRMADO','EN CURSO','FINALIZADO','CANCELADO'];if(!estados.includes(estatus))return{ok:false,mensaje:'Selecciona un estatus válido.'};
   const lock=LockService.getDocumentLock();if(!lock.tryLock(15000))return{ok:false,mensaje:'El sistema está ocupado. Intenta nuevamente.'};
-  try{const libro=SpreadsheetApp.getActiveSpreadsheet(),hoja=obtenerHojaObligatoria_(libro,SYHME.HOJAS.EVENTOS),eventos=obtenerEventos_(),cliente=obtenerClientes_().find(x=>x.id===idCliente);if(!cliente)return{ok:false,mensaje:'El cliente seleccionado ya no existe.'};if(!id&&cliente.estatus!=='ACTIVO')return{ok:false,mensaje:'El cliente seleccionado no está activo.'};
-    const isoInicio=formatearFechaIso_(inicio),duplicado=eventos.find(x=>claveTexto_(x.nombre)===claveTexto_(nombre)&&x.inicio===isoInicio&&x.id!==id);if(duplicado)return{ok:false,mensaje:`Ya existe ${duplicado.nombre} con esa fecha de inicio.`};const dias=Math.floor((fin-inicio)/86400000)+1;
-    if(id){const actual=eventos.find(x=>x.id===id);if(!actual)return{ok:false,mensaje:'El evento seleccionado ya no existe.'};hoja.getRange(actual.fila,2,1,10).setValues([[nombre,idCliente,cliente.nombre,inicio,fin,dias,estatus,actual.idCarpeta,actual.urlCarpeta,observaciones]]);registrarBitacora_({modulo:'EVENTOS',accion:'MODIFICACION',idRegistro:id,valorAnterior:JSON.stringify({nombre:actual.nombre,cliente:actual.cliente,inicio:actual.inicio,fin:actual.fin,estatus:actual.estatus}),valorNuevo:JSON.stringify({nombre,cliente:cliente.nombre,inicio:isoInicio,fin:formatearFechaIso_(fin),estatus}),detalle:'Evento actualizado desde el formulario.'});return{ok:true,mensaje:`Evento ${id} actualizado correctamente.`}}
-    const nuevoId=generarId_('EVE',hoja);hoja.appendRow([nuevoId,nombre,idCliente,cliente.nombre,inicio,fin,dias,estatus,'','',observaciones]);registrarBitacora_({modulo:'EVENTOS',accion:'ALTA',idRegistro:nuevoId,valorNuevo:JSON.stringify({nombre,cliente:cliente.nombre,inicio:isoInicio,fin:formatearFechaIso_(fin),estatus}),detalle:'Evento registrado desde el formulario.'});return{ok:true,mensaje:`Evento guardado con ID ${nuevoId}.`};
+  try{
+    const libro=SpreadsheetApp.getActiveSpreadsheet(),hoja=obtenerHojaObligatoria_(libro,SYHME.HOJAS.EVENTOS),eventos=obtenerEventos_(),cliente=obtenerClientes_().find(x=>x.id===idCliente);
+    if(!cliente)return{ok:false,mensaje:'El cliente seleccionado ya no existe.'};if(!id&&cliente.estatus!=='ACTIVO')return{ok:false,mensaje:'El cliente seleccionado no está activo.'};
+    const isoInicio=formatearFechaIso_(inicio),duplicado=eventos.find(x=>claveTexto_(x.nombre)===claveTexto_(nombre)&&x.inicio===isoInicio&&x.id!==id);if(duplicado)return{ok:false,mensaje:`Ya existe ${duplicado.nombre} con esa fecha de inicio.`};
+    const dias=Math.floor((fin-inicio)/86400000)+1;
+    const estatus=cancelar?'CANCELADO':calcularEstatusEvento_(inicio,fin);
+
+    if(id){
+      const actual=eventos.find(x=>x.id===id);if(!actual)return{ok:false,mensaje:'El evento seleccionado ya no existe.'};
+      const urlCarpeta=crearOEncontrarCarpetaEvento_(id,nombre);
+      hoja.getRange(actual.fila,2,1,9).setValues([[nombre,idCliente,cliente.nombre,inicio,fin,dias,estatus,formulaCarpeta_(urlCarpeta),observaciones]]);
+      registrarBitacora_({modulo:'EVENTOS',accion:'MODIFICACION',idRegistro:id,valorAnterior:JSON.stringify({nombre:actual.nombre,cliente:actual.cliente,inicio:actual.inicio,fin:actual.fin,estatus:actual.estatus}),valorNuevo:JSON.stringify({nombre,cliente:cliente.nombre,inicio:isoInicio,fin:formatearFechaIso_(fin),estatus}),detalle:'Evento actualizado desde el formulario.'});
+      return{ok:true,mensaje:`Evento ${id} actualizado correctamente.`};
+    }
+
+    const nuevoId=generarId_('EVE',hoja);
+    const urlCarpeta=crearOEncontrarCarpetaEvento_(nuevoId,nombre);
+    hoja.appendRow([nuevoId,nombre,idCliente,cliente.nombre,inicio,fin,dias,estatus,formulaCarpeta_(urlCarpeta),observaciones]);
+    registrarBitacora_({modulo:'EVENTOS',accion:'ALTA',idRegistro:nuevoId,valorNuevo:JSON.stringify({nombre,cliente:cliente.nombre,inicio:isoInicio,fin:formatearFechaIso_(fin),estatus,carpeta:urlCarpeta}),detalle:'Evento y carpeta de Drive registrados desde el formulario.'});
+    return{ok:true,mensaje:`Evento guardado con ID ${nuevoId}. Carpeta creada en Drive.`,idEvento:nuevoId};
   }finally{lock.releaseLock()}
 }
 
+function actualizarEstatusEventos_() {
+  const libro = SpreadsheetApp.getActiveSpreadsheet();
+  const hoja = obtenerHojaObligatoria_(libro, SYHME.HOJAS.EVENTOS);
+  const eventos = obtenerEventos_();
+  const hoy = new Date();
+
+  eventos.forEach((evento) => {
+    if (evento.estatus === 'CANCELADO') return;
+
+    const inicio = fechaDesdeIso_(evento.inicio);
+    const fin = fechaDesdeIso_(evento.fin);
+    if (!inicio || !fin) return;
+
+    const nuevoEstatus = calcularEstatusEvento_(inicio, fin, hoy);
+    if (nuevoEstatus !== evento.estatus) {
+      hoja.getRange(evento.fila, 8).setValue(nuevoEstatus);
+      registrarBitacora_({
+        modulo: 'EVENTOS',
+        accion: 'ACTUALIZACION_AUTOMATICA',
+        idRegistro: evento.id,
+        valorAnterior: evento.estatus,
+        valorNuevo: nuevoEstatus,
+        detalle: 'Estatus recalculado automáticamente por fecha.',
+      });
+    }
+  });
+}
+
+function instalarActualizacionDiariaEventos() {
+  ScriptApp.getProjectTriggers()
+    .filter((t) => t.getHandlerFunction() === 'actualizarEstatusEventos_')
+    .forEach((t) => ScriptApp.deleteTrigger(t));
+
+  ScriptApp.newTrigger('actualizarEstatusEventos_').timeBased().everyDays(1).atHour(1).create();
+  SpreadsheetApp.getActive().toast('Actualización diaria de estatus activada.', 'Syhme', 5);
+}
+
+/* ======================= FIN EVENTOS ======================= */
+
 function obtenerClientes_(){const hoja=obtenerHojaObligatoria_(SpreadsheetApp.getActiveSpreadsheet(),SYHME.HOJAS.CLIENTES),n=hoja.getLastRow();if(n<2)return[];return hoja.getRange(2,1,n-1,7).getValues().filter(f=>f[0]&&f[1]).map((f,i)=>({fila:i+2,id:String(f[0]),nombre:String(f[1]),correo:String(f[2]||''),estatus:String(f[3]),fechaAlta:f[4],observaciones:String(f[6]||'')}))}
-function obtenerEventos_(){const hoja=obtenerHojaObligatoria_(SpreadsheetApp.getActiveSpreadsheet(),SYHME.HOJAS.EVENTOS),n=hoja.getLastRow();if(n<2)return[];return hoja.getRange(2,1,n-1,11).getValues().filter(f=>f[0]&&f[1]).map((f,i)=>({fila:i+2,id:String(f[0]),nombre:String(f[1]),idCliente:String(f[2]),cliente:String(f[3]),inicio:formatearFechaIso_(f[4]),fin:formatearFechaIso_(f[5]),estatus:String(f[7]),idCarpeta:String(f[8]||''),urlCarpeta:String(f[9]||''),observaciones:String(f[10]||'')}))}
+function obtenerEventos_(){const hoja=obtenerHojaObligatoria_(SpreadsheetApp.getActiveSpreadsheet(),SYHME.HOJAS.EVENTOS),n=hoja.getLastRow();if(n<2)return[];return hoja.getRange(2,1,n-1,10).getValues().filter(f=>f[0]&&f[1]).map((f,i)=>({fila:i+2,id:String(f[0]),nombre:String(f[1]),idCliente:String(f[2]),cliente:String(f[3]),inicio:formatearFechaIso_(f[4]),fin:formatearFechaIso_(f[5]),estatus:String(f[7]),urlCarpeta:String(f[8]||''),observaciones:String(f[9]||'')}))}
 function contarEventosAbiertosPorCliente_(id){return obtenerEventos_().filter(x=>x.idCliente===id&&!['FINALIZADO','CANCELADO'].includes(x.estatus)).length}
 function fechaDesdeIso_(v){const m=String(v||'').match(/^(\d{4})-(\d{2})-(\d{2})$/);if(!m)return null;const f=new Date(+m[1],+m[2]-1,+m[3],12);return f.getFullYear()===+m[1]&&f.getMonth()===+m[2]-1&&f.getDate()===+m[3]?f:null}
 function formatearFechaIso_(v){if(!(v instanceof Date)||isNaN(v))return'';return Utilities.formatDate(v,Session.getScriptTimeZone()||'America/Mexico_City','yyyy-MM-dd')}
