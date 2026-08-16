@@ -6,10 +6,14 @@ const SYHME = Object.freeze({
     CLIENTES: 'CLIENTES',
     EVENTOS: 'EVENTOS',
     COTIZACIONES: 'COTIZACIONES',
+    ASIGNACIONES: 'ASIGNACIONES',
+    TURNOS: 'TURNOS',
     BITACORA: 'BITACORA',
   }),
   ESTATUS_ACTIVO: 'ACTIVO',
   ID_CARPETA_RAIZ_EVENTOS: '1r2vUndE43ync3fmBl9_cayv-QZ1a4YtP',
+  PUESTO_DIRECCION: 'DIRECCIÓN',
+  FRACCIONES_TURNO: Object.freeze({ '': 0, '1/2': 0.5, '12': 1, '12 1/2': 1.5, '24': 2 }),
 });
 
 function onOpen() {
@@ -22,7 +26,9 @@ function onOpen() {
     .addItem('Catálogo de puestos', 'abrirCatalogoPuestos')
     .addItem('Catálogo de clientes', 'abrirCatalogoClientes')
     .addItem('Catálogo de eventos', 'abrirCatalogoEventos')
-    .addItem('Catálogo de cotizaciones', 'abrirCatalogoCotizaciones');
+    .addItem('Catálogo de cotizaciones', 'abrirCatalogoCotizaciones')
+    .addItem('Catálogo de asignaciones', 'abrirCatalogoAsignaciones')
+    .addItem('Catálogo de turnos', 'abrirCatalogoTurnos');
 
   ui.createMenu('Syhme')
     .addItem('Dar de alta empleado', 'mostrarFormularioAltaEmpleado')
@@ -33,6 +39,9 @@ function onOpen() {
     .addItem('Administrar eventos', 'mostrarFormularioEventos')
     .addSeparator()
     .addItem('Administrar cotizaciones', 'mostrarFormularioCotizaciones')
+    .addSeparator()
+    .addItem('Administrar asignaciones', 'mostrarFormularioAsignaciones')
+    .addItem('Administrar turnos', 'mostrarFormularioTurnos')
     .addSeparator()
     .addSubMenu(menuAbrir)
     .addSeparator()
@@ -195,6 +204,22 @@ function abrirCatalogoEmpleados() {
   libro.setActiveSheet(obtenerHojaObligatoria_(libro, SYHME.HOJAS.EMPLEADOS));
 }
 
+function obtenerEmpleados_() {
+  const hoja = obtenerHojaObligatoria_(SpreadsheetApp.getActiveSpreadsheet(), SYHME.HOJAS.EMPLEADOS);
+  const ultimaFila = hoja.getLastRow();
+  if (ultimaFila < 2) return [];
+  return hoja.getRange(2, 1, ultimaFila - 1, 7).getValues()
+    .filter((f) => f[0] && f[1])
+    .map((f, i) => ({
+      fila: i + 2, id: String(f[0]), nombre: String(f[1]), idPuesto: String(f[2]),
+      puesto: String(f[3]), estatus: String(f[4]), fechaAlta: f[5],
+    }));
+}
+
+function obtenerEmpleadosActivos_() {
+  return obtenerEmpleados_().filter((e) => e.estatus === SYHME.ESTATUS_ACTIVO);
+}
+
 function mostrarFormularioPuestos() {
   const puestosJson = JSON.stringify(obtenerPuestos_()).replace(/</g, '\\u003c');
   const html = HtmlService.createHtmlOutput(`
@@ -302,7 +327,7 @@ function guardarClienteDesdeFormulario(datos) {
   }finally{lock.releaseLock()}
 }
 
-/* ======================= EVENTOS (estatus dinámico + carpeta Drive automática, sin columna de ID de carpeta) ======================= */
+/* ======================= EVENTOS (estatus dinámico + carpeta Drive automática + auto-asignación de dirección) ======================= */
 
 function calcularEstatusEvento_(inicio, fin, hoy) {
   hoy = hoy || new Date();
@@ -347,7 +372,7 @@ function mostrarFormularioEventos() {
     .estatus-actual{background:#eceff1;border-radius:6px;padding:9px;font-weight:700;color:#2d516a}
     .check-cancelar{display:flex;align-items:center;gap:8px;font-weight:400;margin-top:10px}
     .check-cancelar input{width:auto}
-  </style></head><body><h2>Eventos</h2><p>El estatus se calcula solo según las fechas. Al crear el evento se genera automáticamente su carpeta en Drive.</p><form id="formulario">
+  </style></head><body><h2>Eventos</h2><p>El estatus se calcula solo según las fechas. Al crear el evento se genera automáticamente su carpeta en Drive y se asigna a los directores activos.</p><form id="formulario">
   <label for="idEvento">Registro</label><select id="idEvento"><option value="">+ NUEVO EVENTO</option></select><label for="nombre">Nombre del evento</label><input id="nombre" maxlength="120" required>
   <label for="idCliente">Cliente</label><select id="idCliente" required></select><div class="grid"><div><label for="inicio">Fecha de inicio</label><input id="inicio" type="date" required></div><div><label for="fin">Fecha de fin</label><input id="fin" type="date" required></div></div>
   <div id="bloqueEstatus" style="display:none">
@@ -385,7 +410,14 @@ function guardarEventoDesdeFormulario(datos) {
     const urlCarpeta=crearOEncontrarCarpetaEvento_(nuevoId,nombre);
     hoja.appendRow([nuevoId,nombre,idCliente,cliente.nombre,inicio,fin,dias,estatus,formulaCarpeta_(urlCarpeta),observaciones]);
     registrarBitacora_({modulo:'EVENTOS',accion:'ALTA',idRegistro:nuevoId,valorNuevo:JSON.stringify({nombre,cliente:cliente.nombre,inicio:isoInicio,fin:formatearFechaIso_(fin),estatus,carpeta:urlCarpeta}),detalle:'Evento y carpeta de Drive registrados desde el formulario.'});
-    return{ok:true,mensaje:`Evento guardado con ID ${nuevoId}. Carpeta creada en Drive.`,idEvento:nuevoId};
+
+    try {
+      asegurarDirectoresAsignados_(nuevoId, nombre);
+    } catch (errorDirectores) {
+      // No bloquea la creación del evento si falla la auto-asignación de directores.
+    }
+
+    return{ok:true,mensaje:`Evento guardado con ID ${nuevoId}. Carpeta creada y directores asignados automáticamente.`,idEvento:nuevoId};
   }finally{lock.releaseLock()}
 }
 
@@ -593,6 +625,395 @@ function abrirCatalogoCotizaciones() {
   const libro = SpreadsheetApp.getActiveSpreadsheet();
   libro.setActiveSheet(obtenerHojaObligatoria_(libro, SYHME.HOJAS.COTIZACIONES));
 }
+
+/* ======================= ASIGNACIONES ======================= */
+
+function mostrarFormularioAsignaciones() {
+  const eventos = obtenerEventos_().filter((e) => e.estatus !== 'CANCELADO');
+  if (!eventos.length) {
+    SpreadsheetApp.getUi().alert('Registra un evento que no esté cancelado antes de crear asignaciones.');
+    return;
+  }
+
+  const empleados = obtenerEmpleadosActivos_();
+  if (!empleados.length) {
+    SpreadsheetApp.getUi().alert('No hay empleados activos. Da de alta al menos un empleado antes de asignarlo a un evento.');
+    return;
+  }
+
+  const datos = JSON.stringify({
+    eventos,
+    empleados,
+    asignaciones: obtenerAsignaciones_(),
+  }).replace(/</g, '\\u003c');
+
+  const html = HtmlService.createHtmlOutput(`
+    <!doctype html><html><head><base target="_top"><style>${estilosFormulario_()}</style></head><body>
+      <h2>Asignaciones</h2>
+      <p>Selecciona el evento y el empleado. La tarifa se copia del puesto y puedes ajustarla si el acuerdo para este evento es distinto.</p>
+      <form id="formulario">
+        <label for="idAsignacion">Registro</label>
+        <select id="idAsignacion"><option value="">+ NUEVA ASIGNACIÓN</option></select>
+        <label for="idEvento">Evento</label>
+        <select id="idEvento" required></select>
+        <label for="idEmpleado">Empleado</label>
+        <select id="idEmpleado" required></select>
+        <div class="grid">
+          <div><label for="puestoActual">Puesto</label><input id="puestoActual" disabled></div>
+          <div><label for="tarifaAcordada">Tarifa por turno acordada</label><input id="tarifaAcordada" type="number" min="0.01" step="0.01" required></div>
+        </div>
+        <label for="estatus">Estatus</label>
+        <select id="estatus"><option>ACTIVO</option><option>INACTIVO</option></select>
+        <label for="observaciones">Observaciones</label><textarea id="observaciones" maxlength="300"></textarea>
+        <div id="mensaje"></div>
+        <div class="acciones"><button type="button" class="secundario" onclick="google.script.host.close()">Cancelar</button><button id="guardar" class="primario">Guardar asignación</button></div>
+      </form>
+      <script>
+        const datos=${datos},q=id=>document.getElementById(id),sel=q('idAsignacion'),se=q('idEvento'),sp=q('idEmpleado');
+        datos.eventos.forEach(x=>{const o=document.createElement('option');o.value=x.id;o.textContent=x.nombre+' — '+x.inicio;se.appendChild(o)});
+        datos.empleados.forEach(x=>{const o=document.createElement('option');o.value=x.id;o.textContent=x.nombre+' ('+x.puesto+')';sp.appendChild(o)});
+        datos.asignaciones.forEach(x=>{const o=document.createElement('option');o.value=x.id;o.textContent=x.id+' — '+x.empleado+' — '+x.evento;sel.appendChild(o)});
+
+        function tarifaPuesto(idEmpleado){const e=datos.empleados.find(x=>x.id===idEmpleado);return e?e.tarifaPuesto:0}
+        function puestoDe(idEmpleado){const e=datos.empleados.find(x=>x.id===idEmpleado);return e?e.puesto:''}
+
+        function cargar(){
+          const x=datos.asignaciones.find(v=>v.id===sel.value),nuevo=!x;
+          if(x){
+            se.value=x.idEvento;
+            if(![...sp.options].some(o=>o.value===x.idEmpleado)){const o=document.createElement('option');o.value=x.idEmpleado;o.textContent=x.empleado+' ('+x.puesto+') (INACTIVO)';sp.appendChild(o)}
+            sp.value=x.idEmpleado;
+            q('puestoActual').value=x.puesto;
+            q('tarifaAcordada').value=x.tarifaAcordada;
+            q('estatus').value=x.estatus;
+            q('observaciones').value=x.observaciones;
+          } else {
+            q('puestoActual').value=puestoDe(sp.value);
+            q('tarifaAcordada').value=tarifaPuesto(sp.value);
+            q('estatus').value='ACTIVO';
+            q('observaciones').value='';
+          }
+          se.disabled=!nuevo;sp.disabled=!nuevo;q('mensaje').textContent='';
+        }
+        sel.onchange=cargar;
+        sp.onchange=()=>{if(!sel.value){q('puestoActual').value=puestoDe(sp.value);q('tarifaAcordada').value=tarifaPuesto(sp.value)}};
+        cargar();
+
+        q('formulario').onsubmit=e=>{e.preventDefault();q('guardar').disabled=true;q('mensaje').className='';q('mensaje').textContent='Guardando...';
+          google.script.run.withSuccessHandler(r=>{q('guardar').disabled=false;q('mensaje').className=r.ok?'ok':'error';q('mensaje').textContent=r.mensaje;if(r.ok)setTimeout(()=>google.script.host.close(),900)})
+          .withFailureHandler(e=>{q('guardar').disabled=false;q('mensaje').className='error';q('mensaje').textContent=e.message||'No fue posible guardar la asignación.'})
+          .guardarAsignacionDesdeFormulario({idAsignacion:sel.value,idEvento:se.value,idEmpleado:sp.value,tarifaAcordada:q('tarifaAcordada').value,estatus:q('estatus').value,observaciones:q('observaciones').value})};
+      </script>
+    </body></html>
+  `).setWidth(540).setHeight(680);
+  SpreadsheetApp.getUi().showModalDialog(html, 'Syhme');
+}
+
+function guardarAsignacionDesdeFormulario(datos) {
+  const id = String((datos && datos.idAsignacion) || '').trim();
+  const idEvento = String((datos && datos.idEvento) || '').trim();
+  const idEmpleado = String((datos && datos.idEmpleado) || '').trim();
+  const tarifaAcordada = Number(datos && datos.tarifaAcordada);
+  const estatus = String((datos && datos.estatus) || '').trim().toUpperCase();
+  const observaciones = String((datos && datos.observaciones) || '').trim().slice(0, 300);
+
+  if (!idEvento) return { ok: false, mensaje: 'Selecciona un evento.' };
+  if (!idEmpleado) return { ok: false, mensaje: 'Selecciona un empleado.' };
+  if (!Number.isFinite(tarifaAcordada) || tarifaAcordada <= 0) return { ok: false, mensaje: 'La tarifa debe ser mayor que cero.' };
+  if (!['ACTIVO', 'INACTIVO'].includes(estatus)) return { ok: false, mensaje: 'Selecciona un estatus válido.' };
+
+  const lock = LockService.getDocumentLock();
+  if (!lock.tryLock(15000)) return { ok: false, mensaje: 'El sistema está ocupado. Intenta nuevamente.' };
+
+  try {
+    const libro = SpreadsheetApp.getActiveSpreadsheet();
+    const hoja = obtenerHojaObligatoria_(libro, SYHME.HOJAS.ASIGNACIONES);
+    const asignaciones = obtenerAsignaciones_();
+    const evento = obtenerEventos_().find((e) => e.id === idEvento);
+    if (!evento) return { ok: false, mensaje: 'El evento seleccionado ya no existe.' };
+    if (!id && evento.estatus === 'CANCELADO') return { ok: false, mensaje: 'No se puede asignar personal a un evento cancelado.' };
+
+    const empleado = obtenerEmpleados_().find((e) => e.id === idEmpleado);
+    if (!empleado) return { ok: false, mensaje: 'El empleado seleccionado ya no existe.' };
+    if (!id && empleado.estatus !== SYHME.ESTATUS_ACTIVO) return { ok: false, mensaje: 'El empleado seleccionado no está activo.' };
+
+    const duplicado = asignaciones.find((a) => a.idEvento === idEvento && a.idEmpleado === idEmpleado && a.estatus === 'ACTIVO' && a.id !== id);
+    if (duplicado) return { ok: false, mensaje: `${empleado.nombre} ya está asignado a este evento (${duplicado.id}).` };
+
+    if (id) {
+      const actual = asignaciones.find((a) => a.id === id);
+      if (!actual) return { ok: false, mensaje: 'La asignación seleccionada ya no existe.' };
+      hoja.getRange(actual.fila, 7, 1, 3).setValues([[tarifaAcordada, estatus, observaciones]]);
+      registrarBitacora_({
+        modulo: 'ASIGNACIONES', accion: 'MODIFICACION', idRegistro: id,
+        valorAnterior: JSON.stringify({ tarifaAcordada: actual.tarifaAcordada, estatus: actual.estatus }),
+        valorNuevo: JSON.stringify({ tarifaAcordada, estatus }),
+        detalle: 'Asignación actualizada desde el formulario.',
+      });
+      return { ok: true, mensaje: `Asignación ${id} actualizada correctamente.` };
+    }
+
+    const nuevoId = generarId_('ASG', hoja);
+    hoja.appendRow([nuevoId, idEvento, idEmpleado, empleado.nombre, empleado.idPuesto, empleado.puesto, tarifaAcordada, estatus, observaciones]);
+    registrarBitacora_({
+      modulo: 'ASIGNACIONES', accion: 'ALTA', idRegistro: nuevoId,
+      valorNuevo: JSON.stringify({ evento: evento.nombre, empleado: empleado.nombre, puesto: empleado.puesto, tarifaAcordada, estatus }),
+      detalle: 'Asignación registrada desde el formulario.',
+    });
+    return { ok: true, mensaje: `Asignación guardada con ID ${nuevoId}.`, idAsignacion: nuevoId };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function obtenerAsignaciones_() {
+  const hoja = obtenerHojaObligatoria_(SpreadsheetApp.getActiveSpreadsheet(), SYHME.HOJAS.ASIGNACIONES);
+  const ultimaFila = hoja.getLastRow();
+  if (ultimaFila < 2) return [];
+  return hoja.getRange(2, 1, ultimaFila - 1, 9).getValues()
+    .filter((f) => f[0] && f[1])
+    .map((f, i) => ({
+      fila: i + 2, id: String(f[0]), idEvento: String(f[1]), idEmpleado: String(f[2]), empleado: String(f[3]),
+      idPuesto: String(f[4]), puesto: String(f[5]), tarifaAcordada: Number(f[6]) || 0, estatus: String(f[7]), observaciones: String(f[8] || ''),
+    }))
+    .map((a) => {
+      const evento = obtenerEventos_().find((e) => e.id === a.idEvento);
+      return Object.assign({}, a, { evento: evento ? evento.nombre : a.idEvento });
+    });
+}
+
+function obtenerAsignacionesActivasPorEvento_(idEvento) {
+  return obtenerAsignaciones_().filter((a) => a.idEvento === idEvento && a.estatus === 'ACTIVO');
+}
+
+function asegurarDirectoresAsignados_(idEvento, nombreEvento) {
+  const libro = SpreadsheetApp.getActiveSpreadsheet();
+  const hoja = obtenerHojaObligatoria_(libro, SYHME.HOJAS.ASIGNACIONES);
+  const directores = obtenerEmpleadosActivos_().filter((e) => claveTexto_(e.puesto) === claveTexto_(SYHME.PUESTO_DIRECCION));
+  if (!directores.length) return;
+
+  const asignacionesActuales = obtenerAsignaciones_();
+  const puestoDireccion = obtenerPuestos_().find((p) => claveTexto_(p.nombre) === claveTexto_(SYHME.PUESTO_DIRECCION));
+  const tarifaDireccion = puestoDireccion ? puestoDireccion.tarifa : 0;
+
+  directores.forEach((director) => {
+    const yaAsignado = asignacionesActuales.find((a) => a.idEvento === idEvento && a.idEmpleado === director.id && a.estatus === 'ACTIVO');
+    if (yaAsignado) return;
+
+    const nuevoId = generarId_('ASG', hoja);
+    hoja.appendRow([nuevoId, idEvento, director.id, director.nombre, director.idPuesto, director.puesto, tarifaDireccion, 'ACTIVO', 'Asignación automática de dirección']);
+    registrarBitacora_({
+      modulo: 'ASIGNACIONES', accion: 'ALTA_AUTOMATICA', idRegistro: nuevoId,
+      valorNuevo: JSON.stringify({ evento: nombreEvento, empleado: director.nombre, tarifaAcordada: tarifaDireccion }),
+      detalle: 'Dirección asignada automáticamente al crear el evento.',
+    });
+  });
+}
+
+function abrirCatalogoAsignaciones() {
+  const libro = SpreadsheetApp.getActiveSpreadsheet();
+  libro.setActiveSheet(obtenerHojaObligatoria_(libro, SYHME.HOJAS.ASIGNACIONES));
+}
+
+/* ======================= FIN ASIGNACIONES ======================= */
+
+/* ======================= TURNOS ======================= */
+
+function mostrarFormularioTurnos() {
+  const eventos = obtenerEventos_().filter((e) => e.estatus !== 'CANCELADO');
+  if (!eventos.length) {
+    SpreadsheetApp.getUi().alert('No hay eventos activos para capturar turnos.');
+    return;
+  }
+
+  const asignaciones = obtenerAsignaciones_().filter((a) => a.estatus === 'ACTIVO');
+  if (!asignaciones.length) {
+    SpreadsheetApp.getUi().alert('No hay asignaciones activas. Asigna personal a un evento antes de capturar turnos.');
+    return;
+  }
+
+  const datos = JSON.stringify({
+    eventos,
+    asignaciones,
+    turnos: obtenerTurnos_(),
+    tiposTurno: Object.keys(SYHME.FRACCIONES_TURNO).filter((t) => t !== ''),
+  }).replace(/</g, '\\u003c');
+
+  const html = HtmlService.createHtmlOutput(`
+    <!doctype html><html><head><base target="_top"><style>${estilosFormulario_()}
+      table{width:100%;border-collapse:collapse;margin-top:10px}
+      th,td{padding:6px 4px;border-bottom:1px solid #eceff1;font-size:13px;text-align:left}
+      th{color:#546e7a;font-weight:700}
+      td select{padding:6px}
+      #tablaDias{max-height:280px;overflow-y:auto;border:1px solid #eceff1;border-radius:6px;padding:0 8px}
+      .resumen-turnos{margin-top:10px;font-size:13px;color:#2d516a;font-weight:700}
+    </style></head><body>
+      <h2>Turnos</h2>
+      <p>Elige el evento y el empleado asignado. Verás todos los días del evento; marca el tipo de turno de cada día y guarda todo de una vez.</p>
+      <form id="formulario">
+        <label for="idEvento">Evento</label>
+        <select id="idEvento" required></select>
+        <label for="idAsignacion">Empleado asignado</label>
+        <select id="idAsignacion" required></select>
+        <div id="tablaDias"><table id="tabla"><thead><tr><th>Día</th><th>Turno</th></tr></thead><tbody id="cuerpoTabla"></tbody></table></div>
+        <div class="resumen-turnos" id="resumenTurnos"></div>
+        <div id="mensaje"></div>
+        <div class="acciones"><button type="button" class="secundario" onclick="google.script.host.close()">Cerrar</button><button id="guardar" class="primario">Guardar turnos</button></div>
+      </form>
+      <script>
+        const datos=${datos},q=id=>document.getElementById(id),se=q('idEvento'),sa=q('idAsignacion'),cuerpo=q('cuerpoTabla');
+        const nombresDias=['Domingo','Lunes','Martes','Miércoles','Jueves','Viernes','Sábado'];
+
+        datos.eventos.forEach(x=>{const o=document.createElement('option');o.value=x.id;o.textContent=x.nombre+' — '+x.inicio+' a '+x.fin;se.appendChild(o)});
+
+        function fechasEntre(inicioIso,finIso){
+          const dias=[],inicio=new Date(inicioIso+'T12:00:00'),fin=new Date(finIso+'T12:00:00');
+          for(let f=new Date(inicio);f<=fin;f.setDate(f.getDate()+1)){dias.push(f.toISOString().slice(0,10))}
+          return dias;
+        }
+
+        function cargarAsignaciones(){
+          sa.innerHTML='';
+          const asigEvento=datos.asignaciones.filter(a=>a.idEvento===se.value);
+          asigEvento.forEach(a=>{const o=document.createElement('option');o.value=a.id;o.textContent=a.empleado+' ('+a.puesto+')';sa.appendChild(o)});
+          cargarDias();
+        }
+
+        function cargarDias(){
+          cuerpo.innerHTML='';
+          const evento=datos.eventos.find(x=>x.id===se.value);
+          if(!evento||!sa.value){actualizarResumen();return}
+          const dias=fechasEntre(evento.inicio,evento.fin);
+          const turnosExistentes=datos.turnos.filter(t=>t.idEvento===se.value&&t.idAsignacion===sa.value);
+          dias.forEach(fechaIso=>{
+            const fechaObj=new Date(fechaIso+'T12:00:00');
+            const etiqueta=String(fechaObj.getDate()).padStart(2,'0')+' '+nombresDias[fechaObj.getDay()];
+            const existente=turnosExistentes.find(t=>t.fecha===fechaIso);
+            const fila=document.createElement('tr');
+            const celdaFecha=document.createElement('td');celdaFecha.textContent=etiqueta;
+            const celdaSelect=document.createElement('td');
+            const select=document.createElement('select');select.dataset.fecha=fechaIso;
+            const opcionVacia=document.createElement('option');opcionVacia.value='';opcionVacia.textContent='Sin turno';select.appendChild(opcionVacia);
+            datos.tiposTurno.forEach(t=>{const o=document.createElement('option');o.value=t;o.textContent=t;select.appendChild(o)});
+            select.value=existente?existente.tipo:'';
+            select.addEventListener('change',actualizarResumen);
+            celdaSelect.appendChild(select);
+            fila.appendChild(celdaFecha);fila.appendChild(celdaSelect);
+            cuerpo.appendChild(fila);
+          });
+          actualizarResumen();
+        }
+
+        function actualizarResumen(){
+          const fracciones={'':0,'1/2':0.5,'12':1,'12 1/2':1.5,'24':2};
+          let total=0,capturados=0;
+          [...cuerpo.querySelectorAll('select')].forEach(s=>{if(s.value){total+=fracciones[s.value]||0;capturados++}});
+          q('resumenTurnos').textContent='Días con turno: '+capturados+' — Total de turnos: '+total;
+        }
+
+        se.addEventListener('change',cargarAsignaciones);
+        sa.addEventListener('change',cargarDias);
+        cargarAsignaciones();
+
+        q('formulario').onsubmit=e=>{
+          e.preventDefault();
+          const turnos=[...cuerpo.querySelectorAll('select')].map(s=>({fecha:s.dataset.fecha,tipo:s.value}));
+          q('guardar').disabled=true;q('mensaje').className='';q('mensaje').textContent='Guardando...';
+          google.script.run.withSuccessHandler(r=>{q('guardar').disabled=false;q('mensaje').className=r.ok?'ok':'error';q('mensaje').textContent=r.mensaje})
+            .withFailureHandler(err=>{q('guardar').disabled=false;q('mensaje').className='error';q('mensaje').textContent=err.message||'No fue posible guardar los turnos.'})
+            .guardarTurnosDesdeFormulario({idEvento:se.value,idAsignacion:sa.value,turnos});
+        };
+      </script>
+    </body></html>
+  `).setWidth(480).setHeight(620);
+  SpreadsheetApp.getUi().showModalDialog(html, 'Syhme');
+}
+
+function guardarTurnosDesdeFormulario(datos) {
+  const idEvento = String((datos && datos.idEvento) || '').trim();
+  const idAsignacion = String((datos && datos.idAsignacion) || '').trim();
+  const turnos = Array.isArray(datos && datos.turnos) ? datos.turnos : [];
+
+  if (!idEvento) return { ok: false, mensaje: 'Selecciona un evento.' };
+  if (!idAsignacion) return { ok: false, mensaje: 'Selecciona un empleado asignado.' };
+  if (!turnos.length) return { ok: false, mensaje: 'No hay días para guardar.' };
+
+  const lock = LockService.getDocumentLock();
+  if (!lock.tryLock(20000)) return { ok: false, mensaje: 'El sistema está ocupado. Intenta nuevamente.' };
+
+  try {
+    const libro = SpreadsheetApp.getActiveSpreadsheet();
+    const hoja = obtenerHojaObligatoria_(libro, SYHME.HOJAS.TURNOS);
+
+    const evento = obtenerEventos_().find((e) => e.id === idEvento);
+    if (!evento) return { ok: false, mensaje: 'El evento seleccionado ya no existe.' };
+
+    const asignacion = obtenerAsignaciones_().find((a) => a.id === idAsignacion);
+    if (!asignacion) return { ok: false, mensaje: 'La asignación seleccionada ya no existe.' };
+    if (asignacion.idEvento !== idEvento) return { ok: false, mensaje: 'La asignación no corresponde a este evento.' };
+
+    const turnosExistentes = obtenerTurnos_().filter((t) => t.idEvento === idEvento && t.idAsignacion === idAsignacion);
+    let creados = 0;
+    let actualizados = 0;
+    let totalFracciones = 0;
+
+    turnos.forEach(({ fecha, tipo }) => {
+      const fechaIso = String(fecha || '').trim();
+      const tipoTurno = String(tipo || '').trim();
+      if (!fechaIso) return;
+
+      const fraccion = SYHME.FRACCIONES_TURNO.hasOwnProperty(tipoTurno) ? SYHME.FRACCIONES_TURNO[tipoTurno] : 0;
+      totalFracciones += fraccion;
+
+      const existente = turnosExistentes.find((t) => t.fecha === fechaIso);
+      if (existente) {
+        hoja.getRange(existente.fila, 8, 1, 2).setValues([[tipoTurno, fraccion]]);
+        actualizados++;
+      } else if (tipoTurno) {
+        const nuevoId = generarId_('TUR', hoja);
+        hoja.appendRow([
+          nuevoId, idEvento, evento.nombre, idAsignacion, asignacion.idEmpleado, asignacion.empleado,
+          fechaDesdeIso_(fechaIso), tipoTurno, fraccion, '',
+        ]);
+        creados++;
+      }
+    });
+
+    registrarBitacora_({
+      modulo: 'TURNOS', accion: 'CAPTURA', idRegistro: idAsignacion,
+      valorNuevo: JSON.stringify({ evento: evento.nombre, empleado: asignacion.empleado, diasCreados: creados, diasActualizados: actualizados, totalFracciones }),
+      detalle: 'Turnos capturados desde el formulario.',
+    });
+
+    return {
+      ok: true,
+      mensaje: `Turnos guardados para ${asignacion.empleado}. Días nuevos: ${creados}, actualizados: ${actualizados}. Total de turnos: ${totalFracciones}.`,
+    };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function obtenerTurnos_() {
+  const hoja = obtenerHojaObligatoria_(SpreadsheetApp.getActiveSpreadsheet(), SYHME.HOJAS.TURNOS);
+  const ultimaFila = hoja.getLastRow();
+  if (ultimaFila < 2) return [];
+  return hoja.getRange(2, 1, ultimaFila - 1, 10).getValues()
+    .filter((f) => f[0] && f[1])
+    .map((f, i) => ({
+      fila: i + 2, id: String(f[0]), idEvento: String(f[1]), evento: String(f[2]),
+      idAsignacion: String(f[3]), idEmpleado: String(f[4]), empleado: String(f[5]),
+      fecha: formatearFechaIso_(f[6]), tipo: String(f[7] || ''), fraccion: Number(f[8]) || 0,
+      observaciones: String(f[9] || ''),
+    }));
+}
+
+function abrirCatalogoTurnos() {
+  const libro = SpreadsheetApp.getActiveSpreadsheet();
+  libro.setActiveSheet(obtenerHojaObligatoria_(libro, SYHME.HOJAS.TURNOS));
+}
+
+/* ======================= FIN TURNOS ======================= */
 
 function verificarEstructura() {
   const libro = SpreadsheetApp.getActiveSpreadsheet();
