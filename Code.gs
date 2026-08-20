@@ -15,6 +15,7 @@ const SYHME = Object.freeze({
     PAGOS: 'PAGOS',
     CONTROL_FINANCIERO: 'CONTROL_FINANCIERO',
     VISTA_NOMINA: 'VISTA_NOMINA',
+    PANEL: 'PANEL',
     BITACORA: 'BITACORA',
   }),
   ESTATUS_ACTIVO: 'ACTIVO',
@@ -51,6 +52,14 @@ function onOpen() {
     .addItem('Catálogo de pagos', 'abrirCatalogoPagos')
     .addItem('Catálogo de control financiero', 'abrirCatalogoControlFinanciero');
 
+  const menuPanel = ui.createMenu('Panel')
+    .addItem('Abrir Panel', 'abrirPanelNomina')
+    .addSeparator()
+    .addItem('Cargar evento', 'panelCargarEvento_')
+    .addItem('Agregar empleado', 'panelAgregarEmpleado_')
+    .addItem('Guardar turnos', 'panelGuardarTurnos_')
+    .addItem('Generar nómina', 'panelGenerarNomina_');
+
   ui.createMenu('Syhme')
     .addItem('Dar de alta empleado', 'mostrarFormularioAltaEmpleado')
     .addSeparator()
@@ -72,6 +81,8 @@ function onOpen() {
     .addItem('Generar control financiero', 'mostrarFormularioControlFinanciero')
     .addSeparator()
     .addItem('Ver resumen de evento (Vista Nómina)', 'mostrarFormularioVistaNomina')
+    .addSeparator()
+    .addSubMenu(menuPanel)
     .addSeparator()
     .addSubMenu(menuAbrir)
     .addSeparator()
@@ -1988,7 +1999,6 @@ function generarVistaNominaEvento_(idEvento) {
       fila++;
     }
     estiloRangoVista_(hoja.getRange(filaControlInicio, 1, fila - filaControlInicio, anchoTotal), '#f0f3f4', '#000000', false, 10);
-    hoja.getRange(filaControlInicio, 1, fila - filaControlInicio, anchoTotal).getCell(1, 1);
   }
 
   hoja.setColumnWidths(1, 8, 110);
@@ -2005,6 +2015,368 @@ function generarVistaNominaEvento_(idEvento) {
 }
 
 /* ======================= FIN VISTA_NOMINA ======================= */
+
+/* ======================= PANEL (todo en una sola hoja: evento + personal + turnos + nómina) ======================= */
+
+const PANEL_FILA_EVENTO = 3;
+const PANEL_FILA_AGREGAR = 4;
+const PANEL_FILA_ENCABEZADO_DIAS = 6;
+const PANEL_FILA_ENCABEZADO_TABLA = 7;
+const PANEL_FILA_PRIMER_EMPLEADO = 8;
+const PANEL_COL_INDICE = 1;
+const PANEL_COL_ID_ASIGNACION = 2;
+const PANEL_COL_ID_EMPLEADO = 3;
+const PANEL_COL_NOMBRE = 4;
+const PANEL_COL_PUESTO = 5;
+const PANEL_COL_TARIFA = 6;
+const PANEL_COL_DIAS_INICIO = 7;
+const PANEL_CELDA_EVENTO_CARGADO = 'Z1';
+const PANEL_TIPOS_TURNO = ['1/2', '12', '12 1/2', '24'];
+
+function abrirPanelNomina() {
+  const libro = SpreadsheetApp.getActiveSpreadsheet();
+  const hoja = obtenerHojaObligatoria_(libro, SYHME.HOJAS.PANEL);
+  inicializarPanel_(hoja);
+  refrescarListasPanel_(hoja);
+  libro.setActiveSheet(hoja);
+}
+
+function inicializarPanel_(hoja) {
+  if (hoja.getRange('A1').getValue() !== '') return;
+
+  hoja.getRange(1, 1, 1, 6).merge().setValue('PANEL DE NÓMINA');
+  estiloRangoVista_(hoja.getRange(1, 1, 1, 6), '#2d516a', '#ffffff', true, 16);
+
+  hoja.getRange(PANEL_FILA_EVENTO, 1).setValue('Evento:').setFontWeight('bold');
+  hoja.getRange(PANEL_FILA_AGREGAR, 1).setValue('Agregar empleado:').setFontWeight('bold');
+
+  hoja.getRange(2, 1, 1, 6).merge().setValue('Usa el menú Syhme → Panel para Cargar evento, Agregar empleado, Guardar turnos y Generar nómina.');
+  hoja.getRange(2, 1).setFontStyle('italic').setFontColor('#546e7a').setFontSize(9);
+
+  hoja.setColumnWidth(1, 160);
+  hoja.setColumnWidth(2, 260);
+  hoja.setColumnWidths(3, 4, 90);
+}
+
+function refrescarListasPanel_(hoja) {
+  const eventos = obtenerEventos_().filter((e) => e.estatus !== 'CANCELADO');
+  const listaEventos = eventos.map((e) => `${e.id} — ${e.nombre} — ${e.inicio} a ${e.fin}`);
+  const celdaEvento = hoja.getRange(PANEL_FILA_EVENTO, 2);
+  if (listaEventos.length) {
+    celdaEvento.setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(listaEventos, true).setAllowInvalid(false).build());
+  }
+
+  const empleados = obtenerEmpleadosActivos_();
+  const listaEmpleados = empleados.map((e) => `${e.id} — ${e.nombre} (${e.puesto})`);
+  const celdaEmpleado = hoja.getRange(PANEL_FILA_AGREGAR, 2);
+  if (listaEmpleados.length) {
+    celdaEmpleado.setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(listaEmpleados, true).setAllowInvalid(false).build());
+  }
+}
+
+function parseIdDesdeCeldaPanel_(valor) {
+  return String(valor || '').split('—')[0].trim();
+}
+
+function fechasEntreServidor_(inicioIso, finIso) {
+  const dias = [];
+  let actual = fechaDesdeIso_(inicioIso);
+  const fin = fechaDesdeIso_(finIso);
+  if (!actual || !fin) return dias;
+  while (actual <= fin) {
+    dias.push(formatearFechaIso_(actual));
+    actual = new Date(actual.getFullYear(), actual.getMonth(), actual.getDate() + 1, 12);
+  }
+  return dias;
+}
+
+function obtenerUltimaFilaPanel_(hoja) {
+  let fila = PANEL_FILA_PRIMER_EMPLEADO - 1;
+  let cursor = PANEL_FILA_PRIMER_EMPLEADO;
+  while (String(hoja.getRange(cursor, PANEL_COL_INDICE).getValue()) !== '') {
+    fila = cursor;
+    cursor++;
+  }
+  return fila;
+}
+
+function buscarFilaAsignacionEnPanel_(hoja, idAsignacion) {
+  const ultimaFila = obtenerUltimaFilaPanel_(hoja);
+  for (let fila = PANEL_FILA_PRIMER_EMPLEADO; fila <= ultimaFila; fila++) {
+    if (String(hoja.getRange(fila, PANEL_COL_ID_ASIGNACION).getValue()) === idAsignacion) return fila;
+  }
+  return -1;
+}
+
+function construyeTablaPanel_(hoja, idEvento) {
+  const evento = obtenerEventos_().find((e) => e.id === idEvento);
+  if (!evento) throw new Error('El evento seleccionado ya no existe.');
+
+  const maxFilas = hoja.getMaxRows();
+  const maxColumnas = hoja.getMaxColumns();
+  hoja.getRange(PANEL_FILA_ENCABEZADO_DIAS, 1, maxFilas - PANEL_FILA_ENCABEZADO_DIAS + 1, maxColumnas)
+    .clearContent().clearFormat().clearDataValidations();
+  hoja.showColumns(1, maxColumnas);
+
+  hoja.getRange(PANEL_CELDA_EVENTO_CARGADO).setValue(idEvento);
+
+  const dias = fechasEntreServidor_(evento.inicio, evento.fin);
+  const nombresDias = ['Domingo', 'Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado'];
+
+  dias.forEach((fechaIso, indice) => {
+    const color = SYHME.PALETA_DIAS[indice % SYHME.PALETA_DIAS.length];
+    const colBase = PANEL_COL_DIAS_INICIO + indice * 4;
+    const fechaObj = fechaDesdeIso_(fechaIso);
+    const etiqueta = `${String(fechaObj.getDate()).padStart(2, '0')} ${nombresDias[fechaObj.getDay()]}`;
+    const rangoEncabezadoDia = hoja.getRange(PANEL_FILA_ENCABEZADO_DIAS, colBase, 1, 4);
+    rangoEncabezadoDia.merge().setValue(etiqueta);
+    estiloRangoVista_(rangoEncabezadoDia, color.activo, '#ffffff', true, 9);
+
+    const rangoTiposTurno = hoja.getRange(PANEL_FILA_ENCABEZADO_TABLA, colBase, 1, 4);
+    rangoTiposTurno.setValues([PANEL_TIPOS_TURNO]);
+    estiloRangoVista_(rangoTiposTurno, color.fondo, '#000000', true, 8);
+  });
+
+  const colTotalTurnos = PANEL_COL_DIAS_INICIO + dias.length * 4;
+  const colSubtotal = colTotalTurnos + 1;
+
+  const encabezadosFijos = [['#', 'ID_ASIG', 'ID_EMP', 'Nombre', 'Puesto', 'Tarifa']];
+  hoja.getRange(PANEL_FILA_ENCABEZADO_TABLA, 1, 1, 6).setValues(encabezadosFijos);
+  hoja.getRange(PANEL_FILA_ENCABEZADO_TABLA, colTotalTurnos, 1, 2).setValues([['Total turnos', 'Subtotal']]);
+  estiloRangoVista_(hoja.getRange(PANEL_FILA_ENCABEZADO_TABLA, 1, 1, 6), '#424949', '#ffffff', true, 9);
+  estiloRangoVista_(hoja.getRange(PANEL_FILA_ENCABEZADO_TABLA, colTotalTurnos, 1, 2), '#424949', '#ffffff', true, 9);
+
+  const asignaciones = obtenerAsignacionesActivasPorEvento_(idEvento);
+  const puestos = obtenerPuestos_();
+  const turnos = obtenerTurnos_().filter((t) => t.idEvento === idEvento);
+
+  const ordenadas = asignaciones.map((a) => {
+    const puesto = puestos.find((p) => p.id === a.idPuesto);
+    return Object.assign({}, a, { orden: puesto ? puesto.orden : 999 });
+  }).sort((x, y) => x.orden - y.orden || x.empleado.localeCompare(y.empleado, 'es'));
+
+  ordenadas.forEach((a, indiceFila) => {
+    const fila = PANEL_FILA_PRIMER_EMPLEADO + indiceFila;
+    hoja.getRange(fila, 1, 1, 6).setValues([[indiceFila + 1, a.id, a.idEmpleado, a.empleado, a.puesto, a.tarifaAcordada]]);
+
+    let totalTurnos = 0;
+    dias.forEach((fechaIso, indiceDia) => {
+      const color = SYHME.PALETA_DIAS[indiceDia % SYHME.PALETA_DIAS.length];
+      const colBase = PANEL_COL_DIAS_INICIO + indiceDia * 4;
+      PANEL_TIPOS_TURNO.forEach((tipo, indiceTipo) => {
+        const celda = hoja.getRange(fila, colBase + indiceTipo);
+        celda.insertCheckboxes();
+        const existente = turnos.find((t) => t.idAsignacion === a.id && t.fecha === fechaIso && t.tipo === tipo);
+        celda.setValue(Boolean(existente));
+        celda.setBackground(color.fondo);
+        if (existente) totalTurnos += SYHME.FRACCIONES_TURNO[tipo] || 0;
+      });
+    });
+
+    const subtotal = a.tarifaAcordada * totalTurnos;
+    hoja.getRange(fila, colTotalTurnos).setValue(totalTurnos);
+    hoja.getRange(fila, colSubtotal).setValue(subtotal).setNumberFormat('_-"$"* #,##0.00_-;_-"$"* \\-#,##0.00_-;_-"$"* "-"??_-;_-@');
+  });
+
+  hoja.setColumnWidths(PANEL_COL_DIAS_INICIO, dias.length * 4, 34);
+  hoja.setColumnWidth(colTotalTurnos, 90);
+  hoja.setColumnWidth(colSubtotal, 100);
+  hoja.setFrozenRows(PANEL_FILA_ENCABEZADO_TABLA);
+  hoja.setFrozenColumns(6);
+  hoja.hideColumns(PANEL_COL_ID_ASIGNACION, 2);
+}
+
+function panelCargarEvento_() {
+  const libro = SpreadsheetApp.getActiveSpreadsheet();
+  const hoja = obtenerHojaObligatoria_(libro, SYHME.HOJAS.PANEL);
+  const idEvento = parseIdDesdeCeldaPanel_(hoja.getRange(PANEL_FILA_EVENTO, 2).getValue());
+  if (!idEvento) { SpreadsheetApp.getUi().alert('Selecciona un evento en la celda B3.'); return; }
+
+  const lock = LockService.getDocumentLock();
+  if (!lock.tryLock(20000)) { SpreadsheetApp.getUi().alert('El sistema está ocupado. Intenta nuevamente.'); return; }
+
+  try {
+    construyeTablaPanel_(hoja, idEvento);
+    refrescarListasPanel_(hoja);
+    SpreadsheetApp.getActive().toast('Evento cargado en el Panel.', 'Syhme', 5);
+  } catch (error) {
+    SpreadsheetApp.getUi().alert(error.message || 'No fue posible cargar el evento.');
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function panelAgregarEmpleado_() {
+  const libro = SpreadsheetApp.getActiveSpreadsheet();
+  const hoja = obtenerHojaObligatoria_(libro, SYHME.HOJAS.PANEL);
+  const idEventoCargado = String(hoja.getRange(PANEL_CELDA_EVENTO_CARGADO).getValue() || '').trim();
+  const idEventoSeleccionado = parseIdDesdeCeldaPanel_(hoja.getRange(PANEL_FILA_EVENTO, 2).getValue());
+
+  if (!idEventoCargado || idEventoCargado !== idEventoSeleccionado) {
+    SpreadsheetApp.getUi().alert('Primero usa "Cargar evento" para este evento.');
+    return;
+  }
+
+  const idEmpleado = parseIdDesdeCeldaPanel_(hoja.getRange(PANEL_FILA_AGREGAR, 2).getValue());
+  if (!idEmpleado) { SpreadsheetApp.getUi().alert('Selecciona un empleado en la celda B4.'); return; }
+
+  const lock = LockService.getDocumentLock();
+  if (!lock.tryLock(20000)) { SpreadsheetApp.getUi().alert('El sistema está ocupado. Intenta nuevamente.'); return; }
+
+  try {
+    const empleado = obtenerEmpleados_().find((e) => e.id === idEmpleado);
+    if (!empleado) { SpreadsheetApp.getUi().alert('El empleado seleccionado ya no existe.'); return; }
+
+    let asignacion = obtenerAsignaciones_().find((a) => a.idEvento === idEventoCargado && a.idEmpleado === idEmpleado && a.estatus === 'ACTIVO');
+
+    if (!asignacion) {
+      const hojaAsig = obtenerHojaObligatoria_(libro, SYHME.HOJAS.ASIGNACIONES);
+      const nuevoId = generarId_('ASG', hojaAsig);
+      const puesto = obtenerPuestos_().find((p) => p.id === empleado.idPuesto);
+      const tarifa = puesto ? puesto.tarifa : 0;
+      hojaAsig.appendRow([nuevoId, idEventoCargado, idEmpleado, empleado.nombre, empleado.idPuesto, empleado.puesto, tarifa, 'ACTIVO', 'Agregado desde el Panel']);
+      registrarBitacora_({
+        modulo: 'ASIGNACIONES', accion: 'ALTA', idRegistro: nuevoId,
+        valorNuevo: JSON.stringify({ evento: idEventoCargado, empleado: empleado.nombre, tarifaAcordada: tarifa }),
+        detalle: 'Asignación creada desde el Panel.',
+      });
+      asignacion = { id: nuevoId, idEmpleado, empleado: empleado.nombre, idPuesto: empleado.idPuesto, puesto: empleado.puesto, tarifaAcordada: tarifa };
+    }
+
+    if (buscarFilaAsignacionEnPanel_(hoja, asignacion.id) !== -1) {
+      SpreadsheetApp.getUi().alert(`${asignacion.empleado} ya está en la tabla del Panel.`);
+      return;
+    }
+
+    const evento = obtenerEventos_().find((e) => e.id === idEventoCargado);
+    const dias = fechasEntreServidor_(evento.inicio, evento.fin);
+    const ultimaFila = obtenerUltimaFilaPanel_(hoja);
+    const filaNueva = ultimaFila + 1;
+    const indice = filaNueva - PANEL_FILA_PRIMER_EMPLEADO + 1;
+
+    hoja.showColumns(PANEL_COL_ID_ASIGNACION, 2);
+    hoja.getRange(filaNueva, 1, 1, 6).setValues([[indice, asignacion.id, idEmpleado, asignacion.empleado, asignacion.puesto, asignacion.tarifaAcordada]]);
+
+    dias.forEach((fechaIso, indiceDia) => {
+      const color = SYHME.PALETA_DIAS[indiceDia % SYHME.PALETA_DIAS.length];
+      const colBase = PANEL_COL_DIAS_INICIO + indiceDia * 4;
+      PANEL_TIPOS_TURNO.forEach((tipo, indiceTipo) => {
+        const celda = hoja.getRange(filaNueva, colBase + indiceTipo);
+        celda.insertCheckboxes();
+        celda.setValue(false);
+        celda.setBackground(color.fondo);
+      });
+    });
+
+    const colTotalTurnos = PANEL_COL_DIAS_INICIO + dias.length * 4;
+    hoja.getRange(filaNueva, colTotalTurnos).setValue(0);
+    hoja.getRange(filaNueva, colTotalTurnos + 1).setValue(0).setNumberFormat('_-"$"* #,##0.00_-;_-"$"* \\-#,##0.00_-;_-"$"* "-"??_-;_-@');
+
+    hoja.hideColumns(PANEL_COL_ID_ASIGNACION, 2);
+    hoja.getRange(PANEL_FILA_AGREGAR, 2).clearContent();
+
+    SpreadsheetApp.getActive().toast(`${asignacion.empleado} agregado a la tabla.`, 'Syhme', 5);
+  } catch (error) {
+    SpreadsheetApp.getUi().alert(error.message || 'No fue posible agregar el empleado.');
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function panelGuardarTurnos_() {
+  const libro = SpreadsheetApp.getActiveSpreadsheet();
+  const hoja = obtenerHojaObligatoria_(libro, SYHME.HOJAS.PANEL);
+  const idEventoCargado = String(hoja.getRange(PANEL_CELDA_EVENTO_CARGADO).getValue() || '').trim();
+  const idEventoSeleccionado = parseIdDesdeCeldaPanel_(hoja.getRange(PANEL_FILA_EVENTO, 2).getValue());
+
+  if (!idEventoCargado || idEventoCargado !== idEventoSeleccionado) {
+    SpreadsheetApp.getUi().alert('Primero usa "Cargar evento" para este evento.');
+    return;
+  }
+
+  const lock = LockService.getDocumentLock();
+  if (!lock.tryLock(25000)) { SpreadsheetApp.getUi().alert('El sistema está ocupado. Intenta nuevamente.'); return; }
+
+  try {
+    const evento = obtenerEventos_().find((e) => e.id === idEventoCargado);
+    if (!evento) { SpreadsheetApp.getUi().alert('El evento cargado ya no existe.'); return; }
+
+    const dias = fechasEntreServidor_(evento.inicio, evento.fin);
+    const hojaTurnos = obtenerHojaObligatoria_(libro, SYHME.HOJAS.TURNOS);
+    const turnosExistentes = obtenerTurnos_().filter((t) => t.idEvento === idEventoCargado);
+    const colTotalTurnos = PANEL_COL_DIAS_INICIO + dias.length * 4;
+    const ultimaFila = obtenerUltimaFilaPanel_(hoja);
+
+    let empleadosActualizados = 0;
+
+    for (let fila = PANEL_FILA_PRIMER_EMPLEADO; fila <= ultimaFila; fila++) {
+      const idAsignacion = String(hoja.getRange(fila, PANEL_COL_ID_ASIGNACION).getValue());
+      const idEmpleado = String(hoja.getRange(fila, PANEL_COL_ID_EMPLEADO).getValue());
+      const nombre = String(hoja.getRange(fila, PANEL_COL_NOMBRE).getValue());
+      const tarifa = Number(hoja.getRange(fila, PANEL_COL_TARIFA).getValue()) || 0;
+      if (!idAsignacion) continue;
+
+      let totalTurnos = 0;
+
+      dias.forEach((fechaIso, indiceDia) => {
+        const colBase = PANEL_COL_DIAS_INICIO + indiceDia * 4;
+        const valoresDia = hoja.getRange(fila, colBase, 1, 4).getValues()[0];
+        let tipoElegido = '';
+        for (let t = 0; t < 4; t++) {
+          if (valoresDia[t] === true) { tipoElegido = PANEL_TIPOS_TURNO[t]; break; }
+        }
+        const fraccion = SYHME.FRACCIONES_TURNO[tipoElegido] || 0;
+        totalTurnos += fraccion;
+
+        const existente = turnosExistentes.find((t) => t.idAsignacion === idAsignacion && t.fecha === fechaIso);
+        if (existente) {
+          hojaTurnos.getRange(existente.fila, 8, 1, 2).setValues([[tipoElegido, fraccion]]);
+        } else if (tipoElegido) {
+          const nuevoId = generarId_('TUR', hojaTurnos);
+          hojaTurnos.appendRow([nuevoId, idEventoCargado, evento.nombre, idAsignacion, idEmpleado, nombre, fechaDesdeIso_(fechaIso), tipoElegido, fraccion, '']);
+        }
+      });
+
+      const subtotal = tarifa * totalTurnos;
+      hoja.getRange(fila, colTotalTurnos).setValue(totalTurnos);
+      hoja.getRange(fila, colTotalTurnos + 1).setValue(subtotal);
+      empleadosActualizados++;
+    }
+
+    registrarBitacora_({
+      modulo: 'TURNOS', accion: 'CAPTURA_PANEL', idRegistro: idEventoCargado,
+      valorNuevo: JSON.stringify({ evento: evento.nombre, empleados: empleadosActualizados }),
+      detalle: 'Turnos guardados desde el Panel.',
+    });
+
+    SpreadsheetApp.getActive().toast(`Turnos guardados para ${empleadosActualizados} empleado(s).`, 'Syhme', 5);
+  } catch (error) {
+    SpreadsheetApp.getUi().alert(error.message || 'No fue posible guardar los turnos.');
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function panelGenerarNomina_() {
+  const libro = SpreadsheetApp.getActiveSpreadsheet();
+  const hoja = obtenerHojaObligatoria_(libro, SYHME.HOJAS.PANEL);
+  const idEvento = parseIdDesdeCeldaPanel_(hoja.getRange(PANEL_FILA_EVENTO, 2).getValue());
+  if (!idEvento) { SpreadsheetApp.getUi().alert('Selecciona un evento en la celda B3.'); return; }
+
+  const lock = LockService.getDocumentLock();
+  if (!lock.tryLock(25000)) { SpreadsheetApp.getUi().alert('El sistema está ocupado. Intenta nuevamente.'); return; }
+
+  let resultado;
+  try {
+    resultado = generarNominaEvento_(idEvento);
+  } finally {
+    lock.releaseLock();
+  }
+
+  SpreadsheetApp.getUi().alert(resultado.mensaje);
+}
+
+/* ======================= FIN PANEL ======================= */
 
 function verificarEstructura() {
   const libro = SpreadsheetApp.getActiveSpreadsheet();
