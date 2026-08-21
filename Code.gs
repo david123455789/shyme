@@ -80,7 +80,8 @@ function onOpen() {
     .addItem('Administrar pagos de cliente', 'mostrarFormularioPagos')
     .addItem('Generar control financiero', 'mostrarFormularioControlFinanciero')
     .addSeparator()
-    .addItem('Ver resumen de evento (Vista Nómina)', 'mostrarFormularioVistaNomina')
+    .addItem('Abrir Vista Nómina', 'abrirVistaNomina')
+    .addItem('Generar resumen (usar selector de la hoja)', 'vistaNominaGenerarDesdeSelector_')
     .addSeparator()
     .addSubMenu(menuPanel)
     .addSeparator()
@@ -1805,60 +1806,66 @@ function abrirCatalogoControlFinanciero() {
 
 /* ======================= FIN CONTROL_FINANCIERO ======================= */
 
-/* ======================= VISTA_NOMINA (resumen consolidado por evento) ======================= */
+/* ======================= VISTA_NOMINA (con selector de evento en la propia hoja) ======================= */
 
 function estiloRangoVista_(rango, fondo, fuente, negrita, size) {
   rango.setBackground(fondo).setFontColor(fuente).setFontWeight(negrita ? 'bold' : 'normal')
     .setFontFamily('Montserrat').setFontSize(size).setVerticalAlignment('middle').setWrap(true);
 }
 
-function mostrarFormularioVistaNomina() {
+const VISTA_FILA_SELECTOR = 1;
+const VISTA_FILA_INICIO_REPORTE = 3;
+
+function inicializarVistaNomina_(hoja) {
+  const maxColumnas = hoja.getMaxColumns();
+  hoja.getRange(1, 1, 1, maxColumnas).breakApart();
+  hoja.getRange(1, 1, 1, maxColumnas).clearContent().clearFormat().clearDataValidations();
+
+  hoja.getRange(VISTA_FILA_SELECTOR, 1).setValue('Seleccionar evento:').setFontWeight('bold');
+
   const eventos = obtenerEventos_();
-  if (!eventos.length) {
-    SpreadsheetApp.getUi().alert('No hay eventos registrados.');
-    return;
+  const listaEventos = eventos.map((e) => `${e.id} — ${e.nombre} — ${e.inicio} a ${e.fin}`);
+  const celdaSelector = hoja.getRange(VISTA_FILA_SELECTOR, 2, 1, 3).merge();
+  if (listaEventos.length) {
+    celdaSelector.setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(listaEventos, true).setAllowInvalid(false).build());
   }
 
-  const datos = JSON.stringify({ eventos }).replace(/</g, '\\u003c');
+  hoja.getRange(VISTA_FILA_SELECTOR, 5, 1, 4).merge().setValue('Elige un evento a la izquierda; el resumen se genera solo.');
+  hoja.getRange(VISTA_FILA_SELECTOR, 5).setFontStyle('italic').setFontColor('#546e7a').setFontSize(9);
 
-  const html = HtmlService.createHtmlOutput(`
-    <!doctype html><html><head><base target="_top"><style>${estilosFormulario_()}</style></head><body>
-      <h2>Vista Nómina</h2>
-      <p>Genera el resumen consolidado de un evento: asignaciones, turnos, nómina, préstamos, pagos y reparto financiero.</p>
-      <form id="formulario">
-        <label for="idEvento">Evento</label>
-        <select id="idEvento" required></select>
-        <div id="mensaje"></div>
-        <div class="acciones"><button type="button" class="secundario" onclick="google.script.host.close()">Cerrar</button><button id="guardar" class="primario">Generar resumen</button></div>
-      </form>
-      <script>
-        const datos=${datos},q=id=>document.getElementById(id),se=q('idEvento');
-        datos.eventos.forEach(x=>{const o=document.createElement('option');o.value=x.id;o.textContent=x.nombre+' — '+x.inicio;se.appendChild(o)});
-
-        q('formulario').onsubmit=e=>{
-          e.preventDefault();q('guardar').disabled=true;q('mensaje').className='';q('mensaje').textContent='Generando resumen...';
-          google.script.run.withSuccessHandler(r=>{q('guardar').disabled=false;q('mensaje').className=r.ok?'ok':'error';q('mensaje').textContent=r.mensaje;if(r.ok)setTimeout(()=>google.script.host.close(),1200)})
-            .withFailureHandler(err=>{q('guardar').disabled=false;q('mensaje').className='error';q('mensaje').textContent=err.message||'No fue posible generar el resumen.'})
-            .generarVistaNominaDesdeFormulario({idEvento:se.value});
-        };
-      </script>
-    </body></html>
-  `).setWidth(440).setHeight(260);
-  SpreadsheetApp.getUi().showModalDialog(html, 'Syhme');
+  hoja.setColumnWidths(1, 8, 110);
 }
 
-function generarVistaNominaDesdeFormulario(datos) {
-  const idEvento = String((datos && datos.idEvento) || '').trim();
-  if (!idEvento) return { ok: false, mensaje: 'Selecciona un evento.' };
+function abrirVistaNomina() {
+  const libro = SpreadsheetApp.getActiveSpreadsheet();
+  const hoja = obtenerHojaObligatoria_(libro, SYHME.HOJAS.VISTA_NOMINA);
+  inicializarVistaNomina_(hoja);
+  libro.setActiveSheet(hoja);
+}
+
+function vistaNominaGenerarDesdeSelector_() {
+  const libro = SpreadsheetApp.getActiveSpreadsheet();
+  const hoja = obtenerHojaObligatoria_(libro, SYHME.HOJAS.VISTA_NOMINA);
+  if (String(hoja.getRange(VISTA_FILA_SELECTOR, 1).getValue()) !== 'Seleccionar evento:') {
+    inicializarVistaNomina_(hoja);
+  }
+
+  const valorCelda = String(hoja.getRange(VISTA_FILA_SELECTOR, 2).getValue() || '').trim();
+  const idEvento = valorCelda.split('—')[0].trim();
+  if (!idEvento) { SpreadsheetApp.getUi().alert('Selecciona un evento en la celda B1.'); return; }
 
   const lock = LockService.getDocumentLock();
-  if (!lock.tryLock(20000)) return { ok: false, mensaje: 'El sistema está ocupado. Intenta nuevamente.' };
+  if (!lock.tryLock(20000)) { SpreadsheetApp.getUi().alert('El sistema está ocupado. Intenta nuevamente.'); return; }
 
+  let resultado;
   try {
-    return generarVistaNominaEvento_(idEvento);
+    resultado = generarVistaNominaEvento_(idEvento);
   } finally {
     lock.releaseLock();
   }
+
+  if (!resultado.ok) SpreadsheetApp.getUi().alert(resultado.mensaje);
+  else SpreadsheetApp.getActive().toast(resultado.mensaje, 'Syhme', 5);
 }
 
 function generarVistaNominaEvento_(idEvento) {
@@ -1867,8 +1874,18 @@ function generarVistaNominaEvento_(idEvento) {
 
   const libro = SpreadsheetApp.getActiveSpreadsheet();
   const hoja = obtenerHojaObligatoria_(libro, SYHME.HOJAS.VISTA_NOMINA);
-  hoja.clear();
-  hoja.clearFormats();
+
+  const maxFilas = hoja.getMaxRows();
+  const maxColumnas = hoja.getMaxColumns();
+  hoja.getRange(VISTA_FILA_INICIO_REPORTE, 1, maxFilas - VISTA_FILA_INICIO_REPORTE + 1, maxColumnas)
+    .clearContent().clearFormat().clearDataValidations();
+
+  const rangoSelectorActual = hoja.getRange(VISTA_FILA_SELECTOR, 2);
+  const yaValido = rangoSelectorActual.getNumColumns() === 3 && String(hoja.getRange(VISTA_FILA_SELECTOR, 1).getValue()) === 'Seleccionar evento:';
+  if (!yaValido) {
+    inicializarVistaNomina_(hoja);
+  }
+  hoja.getRange(VISTA_FILA_SELECTOR, 2).setValue(`${evento.id} — ${evento.nombre} — ${evento.inicio} a ${evento.fin}`);
 
   const cliente = obtenerClientes_().find((c) => c.id === evento.idCliente);
   const nomina = obtenerNominas_().find((n) => n.idEvento === idEvento);
@@ -1877,7 +1894,7 @@ function generarVistaNominaEvento_(idEvento) {
   const control = obtenerControlFinanciero_().find((c) => c.idEvento === idEvento);
   const movimientosNomina = nomina ? obtenerMovimientosPrestamo_().filter((m) => m.idNomina === nomina.id) : [];
 
-  let fila = 1;
+  let fila = VISTA_FILA_INICIO_REPORTE;
   const anchoTotal = 8;
 
   // Título
@@ -2002,13 +2019,13 @@ function generarVistaNominaEvento_(idEvento) {
   }
 
   hoja.setColumnWidths(1, 8, 110);
-  hoja.setFrozenRows(1);
+  hoja.setFrozenRows(VISTA_FILA_INICIO_REPORTE - 1);
   libro.setActiveSheet(hoja);
 
   registrarBitacora_({
     modulo: 'VISTA_NOMINA', accion: 'GENERACION', idRegistro: idEvento,
     valorNuevo: JSON.stringify({ evento: evento.nombre }),
-    detalle: 'Vista consolidada generada desde el formulario.',
+    detalle: 'Vista consolidada generada desde el selector de la hoja.',
   });
 
   return { ok: true, mensaje: `Resumen de ${evento.nombre} generado correctamente.` };
@@ -2463,4 +2480,27 @@ function claveTexto_(valor) {
   return normalizarNombre_(valor)
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '');
+}
+
+function onEdit(e) {
+  try {
+    const hoja = e.range.getSheet();
+    if (hoja.getName() !== SYHME.HOJAS.VISTA_NOMINA) return;
+    if (e.range.getRow() !== VISTA_FILA_SELECTOR || e.range.getColumn() !== 2) return;
+
+    const valorCelda = String(e.range.getValue() || '').trim();
+    const idEvento = valorCelda.split('—')[0].trim();
+    if (!idEvento) return;
+
+    const lock = LockService.getDocumentLock();
+    if (!lock.tryLock(20000)) return;
+
+    try {
+      generarVistaNominaEvento_(idEvento);
+    } finally {
+      lock.releaseLock();
+    }
+  } catch (error) {
+    // Silencioso: un error aquí no debe interrumpir la edición normal de la hoja.
+  }
 }
