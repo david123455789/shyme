@@ -1806,7 +1806,7 @@ function abrirCatalogoControlFinanciero() {
 
 /* ======================= FIN CONTROL_FINANCIERO ======================= */
 
-/* ======================= VISTA_NOMINA (con selector de evento en la propia hoja) ======================= */
+/* ======================= VISTA_NOMINA (con selector de evento en la propia hoja + turnos por empleado) ======================= */
 
 function estiloRangoVista_(rango, fondo, fuente, negrita, size) {
   rango.setBackground(fondo).setFontColor(fuente).setFontWeight(negrita ? 'bold' : 'normal')
@@ -1877,8 +1877,10 @@ function generarVistaNominaEvento_(idEvento) {
 
   const maxFilas = hoja.getMaxRows();
   const maxColumnas = hoja.getMaxColumns();
-  hoja.getRange(VISTA_FILA_INICIO_REPORTE, 1, maxFilas - VISTA_FILA_INICIO_REPORTE + 1, maxColumnas)
-    .clearContent().clearFormat().clearDataValidations();
+  const rangoReporte = hoja.getRange(VISTA_FILA_INICIO_REPORTE, 1, maxFilas - VISTA_FILA_INICIO_REPORTE + 1, maxColumnas);
+  rangoReporte.clearContent().clearFormat().clearDataValidations();
+  // Fuerza formato de texto plano para evitar que Sheets interprete cualquier valor como fecha/número.
+  rangoReporte.setNumberFormat('@');
 
   const rangoSelectorActual = hoja.getRange(VISTA_FILA_SELECTOR, 2);
   const yaValido = rangoSelectorActual.getNumColumns() === 3 && String(hoja.getRange(VISTA_FILA_SELECTOR, 1).getValue()) === 'Seleccionar evento:';
@@ -1894,8 +1896,19 @@ function generarVistaNominaEvento_(idEvento) {
   const control = obtenerControlFinanciero_().find((c) => c.idEvento === idEvento);
   const movimientosNomina = nomina ? obtenerMovimientosPrestamo_().filter((m) => m.idNomina === nomina.id) : [];
 
+  const dias = fechasEntreServidor_(evento.inicio, evento.fin);
+  const asignaciones = obtenerAsignacionesActivasPorEvento_(idEvento);
+  const puestosCat = obtenerPuestos_();
+  const turnosEvento = obtenerTurnos_().filter((t) => t.idEvento === idEvento);
+  const asignacionesOrdenadas = asignaciones.map((a) => {
+    const puesto = puestosCat.find((p) => p.id === a.idPuesto);
+    return Object.assign({}, a, { orden: puesto ? puesto.orden : 999 });
+  }).sort((x, y) => x.orden - y.orden || x.empleado.localeCompare(y.empleado, 'es'));
+
+  const anchoBase = 8;
+  const anchoTotal = Math.max(anchoBase, 1 + dias.length);
+
   let fila = VISTA_FILA_INICIO_REPORTE;
-  const anchoTotal = 8;
 
   // Título
   hoja.getRange(fila, 1, 1, anchoTotal).merge().setValue(`RESUMEN DE EVENTO — ${evento.nombre}`);
@@ -1910,46 +1923,96 @@ function generarVistaNominaEvento_(idEvento) {
   hoja.getRange(fila, 1).setValue('Fecha inicio:'); hoja.getRange(fila, 2).setValue(evento.inicio);
   hoja.getRange(fila, 3).setValue('Fecha fin:'); hoja.getRange(fila, 4).setValue(evento.fin);
   fila++;
-  estiloRangoVista_(hoja.getRange(filaInicio, 1, fila - filaInicio, anchoTotal), '#f0f3f4', '#000000', false, 10);
+  estiloRangoVista_(hoja.getRange(filaInicio, 1, fila - filaInicio, anchoBase), '#f0f3f4', '#000000', false, 10);
   hoja.getRange(filaInicio, 1, fila - filaInicio, 1).setFontWeight('bold');
   hoja.getRange(filaInicio, 3, fila - filaInicio, 1).setFontWeight('bold');
   hoja.getRange(filaInicio, 5, fila - filaInicio, 1).setFontWeight('bold');
   fila += 1;
 
   // Sección Nómina
-  hoja.getRange(fila, 1, 1, anchoTotal).merge().setValue('DETALLE DE NÓMINA');
-  estiloRangoVista_(hoja.getRange(fila, 1, 1, anchoTotal), '#424949', '#ffffff', true, 12);
+  hoja.getRange(fila, 1, 1, anchoBase).merge().setValue('DETALLE DE NÓMINA');
+  estiloRangoVista_(hoja.getRange(fila, 1, 1, anchoBase), '#424949', '#ffffff', true, 12);
   fila++;
 
   if (!nomina || !detalle.length) {
-    hoja.getRange(fila, 1, 1, anchoTotal).merge().setValue('Aún no se ha generado la nómina de este evento.');
+    hoja.getRange(fila, 1, 1, anchoBase).merge().setValue('Aún no se ha generado la nómina de este evento.');
     fila += 2;
   } else {
     const encabezados = [['Empleado', 'Puesto', 'Tarifa', 'Turnos', 'Subtotal', 'Préstamo', 'Total a pagar', 'Estatus']];
-    const rangoEncabezados = hoja.getRange(fila, 1, 1, anchoTotal);
+    const rangoEncabezados = hoja.getRange(fila, 1, 1, anchoBase);
     rangoEncabezados.setValues(encabezados);
     estiloRangoVista_(rangoEncabezados, '#666666', '#ffffff', true, 9);
     fila++;
 
     const filaDatosInicio = fila;
     detalle.forEach((d) => {
-      hoja.getRange(fila, 1, 1, anchoTotal).setValues([[d.empleado, d.puesto, d.tarifa, d.totalTurnos, d.subtotal, d.prestamo, d.totalPagar, d.estatusPago]]);
+      hoja.getRange(fila, 1).setValue(String(d.empleado || ''));
+      hoja.getRange(fila, 2).setValue(String(d.puesto || ''));
+      hoja.getRange(fila, 3).setValue(Number(d.tarifa) || 0).setNumberFormat('_-"$"* #,##0.00_-;_-"$"* \\-#,##0.00_-;_-"$"* "-"??_-;_-@');
+      hoja.getRange(fila, 4).setValue(Number(d.totalTurnos) || 0).setNumberFormat('0.##');
+      hoja.getRange(fila, 5).setValue(Number(d.subtotal) || 0).setNumberFormat('_-"$"* #,##0.00_-;_-"$"* \\-#,##0.00_-;_-"$"* "-"??_-;_-@');
+      hoja.getRange(fila, 6).setValue(Number(d.prestamo) || 0).setNumberFormat('_-"$"* #,##0.00_-;_-"$"* \\-#,##0.00_-;_-"$"* "-"??_-;_-@');
+      hoja.getRange(fila, 7).setValue(Number(d.totalPagar) || 0).setNumberFormat('_-"$"* #,##0.00_-;_-"$"* \\-#,##0.00_-;_-"$"* "-"??_-;_-@');
+      hoja.getRange(fila, 8).setValue(String(d.estatusPago || ''));
       fila++;
     });
-    estiloRangoVista_(hoja.getRange(filaDatosInicio, 1, detalle.length, anchoTotal), '#ffffff', '#000000', false, 9);
-    hoja.getRange(filaDatosInicio, 3, detalle.length, 4).setNumberFormat('_-"$"* #,##0.00_-;_-"$"* \\-#,##0.00_-;_-"$"* "-"??_-;_-@');
+    estiloRangoVista_(hoja.getRange(filaDatosInicio, 1, detalle.length, anchoBase), '#ffffff', '#000000', false, 9);
 
     hoja.getRange(fila, 1, 1, 6).merge().setValue('Total nómina');
     hoja.getRange(fila, 7).setValue(`=SUM(G${filaDatosInicio}:G${fila - 1})`);
     hoja.getRange(fila, 7).setNumberFormat('_-"$"* #,##0.00_-;_-"$"* \\-#,##0.00_-;_-"$"* "-"??_-;_-@');
-    estiloRangoVista_(hoja.getRange(fila, 1, 1, anchoTotal), '#424949', '#ffffff', true, 9);
+    estiloRangoVista_(hoja.getRange(fila, 1, 1, anchoBase), '#424949', '#ffffff', true, 9);
     fila += 2;
+  }
+
+  // Sección TURNOS POR EMPLEADO (cuadrícula día por día, coloreada, texto plano)
+  hoja.getRange(fila, 1, 1, anchoTotal).merge().setValue('TURNOS POR EMPLEADO');
+  estiloRangoVista_(hoja.getRange(fila, 1, 1, anchoTotal), '#424949', '#ffffff', true, 12);
+  fila++;
+
+  if (!asignacionesOrdenadas.length || !dias.length) {
+    hoja.getRange(fila, 1, 1, anchoTotal).merge().setValue('No hay asignaciones o el evento no tiene días definidos.');
+    fila += 2;
+  } else {
+    const nombresDias = ['Domingo', 'Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado'];
+    const filaEncabezadoTurnos = fila;
+
+    const celdaEncabezadoEmpleado = hoja.getRange(filaEncabezadoTurnos, 1);
+    celdaEncabezadoEmpleado.setValue('Empleado');
+    estiloRangoVista_(celdaEncabezadoEmpleado, '#666666', '#ffffff', true, 9);
+
+    dias.forEach((fechaIso, indiceDia) => {
+      const color = SYHME.PALETA_DIAS[indiceDia % SYHME.PALETA_DIAS.length];
+      const fechaObj = fechaDesdeIso_(fechaIso);
+      const etiqueta = `${String(fechaObj.getDate()).padStart(2, '0')} ${nombresDias[fechaObj.getDay()]}`;
+      const celda = hoja.getRange(filaEncabezadoTurnos, 2 + indiceDia);
+      celda.setValue(etiqueta);
+      estiloRangoVista_(celda, color.activo, '#ffffff', true, 8);
+    });
+    fila++;
+
+    asignacionesOrdenadas.forEach((a) => {
+      const celdaNombre = hoja.getRange(fila, 1);
+      celdaNombre.setValue(`${a.empleado} (${a.puesto})`);
+      estiloRangoVista_(celdaNombre, '#ffffff', '#000000', true, 9);
+
+      dias.forEach((fechaIso, indiceDia) => {
+        const color = SYHME.PALETA_DIAS[indiceDia % SYHME.PALETA_DIAS.length];
+        const turno = turnosEvento.find((t) => t.idAsignacion === a.id && t.fecha === fechaIso);
+        const valorTurno = turno && turno.tipo ? String(turno.tipo).trim() : '—';
+        const celda = hoja.getRange(fila, 2 + indiceDia);
+        celda.setValue(valorTurno);
+        estiloRangoVista_(celda, color.fondo, '#000000', false, 9);
+      });
+      fila++;
+    });
+    fila += 1;
   }
 
   // Sección Préstamos abonados en esta nómina
   if (movimientosNomina.length) {
-    hoja.getRange(fila, 1, 1, anchoTotal).merge().setValue('PRÉSTAMOS ABONADOS EN ESTA NÓMINA');
-    estiloRangoVista_(hoja.getRange(fila, 1, 1, anchoTotal), '#424949', '#ffffff', true, 12);
+    hoja.getRange(fila, 1, 1, anchoBase).merge().setValue('PRÉSTAMOS ABONADOS EN ESTA NÓMINA');
+    estiloRangoVista_(hoja.getRange(fila, 1, 1, anchoBase), '#424949', '#ffffff', true, 12);
     fila++;
 
     hoja.getRange(fila, 1, 1, 4).setValues([['Empleado', 'Importe abonado', 'Saldo resultante', '']]);
@@ -1957,68 +2020,77 @@ function generarVistaNominaEvento_(idEvento) {
     fila++;
 
     movimientosNomina.forEach((m) => {
-      hoja.getRange(fila, 1, 1, 3).setValues([[m.empleado, m.importe, m.saldoResultante]]);
+      hoja.getRange(fila, 1).setValue(String(m.empleado || ''));
+      hoja.getRange(fila, 2).setValue(Number(m.importe) || 0).setNumberFormat('_-"$"* #,##0.00_-;_-"$"* \\-#,##0.00_-;_-"$"* "-"??_-;_-@');
+      hoja.getRange(fila, 3).setValue(Number(m.saldoResultante) || 0).setNumberFormat('_-"$"* #,##0.00_-;_-"$"* \\-#,##0.00_-;_-"$"* "-"??_-;_-@');
       fila++;
     });
     fila += 1;
   }
 
   // Sección Pago del cliente
-  hoja.getRange(fila, 1, 1, anchoTotal).merge().setValue('PAGO DEL CLIENTE');
-  estiloRangoVista_(hoja.getRange(fila, 1, 1, anchoTotal), '#424949', '#ffffff', true, 12);
+  hoja.getRange(fila, 1, 1, anchoBase).merge().setValue('PAGO DEL CLIENTE');
+  estiloRangoVista_(hoja.getRange(fila, 1, 1, anchoBase), '#424949', '#ffffff', true, 12);
   fila++;
 
   if (!pago) {
-    hoja.getRange(fila, 1, 1, anchoTotal).merge().setValue('Sin pago registrado para este evento.');
+    hoja.getRange(fila, 1, 1, anchoBase).merge().setValue('Sin pago registrado para este evento.');
     fila += 2;
   } else {
     const filaPagoInicio = fila;
-    hoja.getRange(fila, 1).setValue('Importe total:'); hoja.getRange(fila, 2).setValue(pago.importeTotal);
-    hoja.getRange(fila, 3).setValue('Anticipo (' + pago.porcentajeAnticipo + '%):'); hoja.getRange(fila, 4).setValue(pago.importeAnticipo);
-    hoja.getRange(fila, 5).setValue('Pagado:'); hoja.getRange(fila, 6).setValue(pago.anticipoPagado);
+    hoja.getRange(fila, 1).setValue('Importe total:');
+    hoja.getRange(fila, 2).setValue(Number(pago.importeTotal) || 0).setNumberFormat('_-"$"* #,##0.00_-;_-"$"* \\-#,##0.00_-;_-"$"* "-"??_-;_-@');
+    hoja.getRange(fila, 3).setValue('Anticipo (' + pago.porcentajeAnticipo + '%):');
+    hoja.getRange(fila, 4).setValue(Number(pago.importeAnticipo) || 0).setNumberFormat('_-"$"* #,##0.00_-;_-"$"* \\-#,##0.00_-;_-"$"* "-"??_-;_-@');
+    hoja.getRange(fila, 5).setValue('Pagado:'); hoja.getRange(fila, 6).setValue(String(pago.anticipoPagado || ''));
     fila++;
-    hoja.getRange(fila, 3).setValue('Finiquito (' + pago.porcentajeFiniquito + '%):'); hoja.getRange(fila, 4).setValue(pago.importeFiniquito);
-    hoja.getRange(fila, 5).setValue('Pagado:'); hoja.getRange(fila, 6).setValue(pago.finiquitoPagado);
+    hoja.getRange(fila, 3).setValue('Finiquito (' + pago.porcentajeFiniquito + '%):');
+    hoja.getRange(fila, 4).setValue(Number(pago.importeFiniquito) || 0).setNumberFormat('_-"$"* #,##0.00_-;_-"$"* \\-#,##0.00_-;_-"$"* "-"??_-;_-@');
+    hoja.getRange(fila, 5).setValue('Pagado:'); hoja.getRange(fila, 6).setValue(String(pago.finiquitoPagado || ''));
     fila++;
-    estiloRangoVista_(hoja.getRange(filaPagoInicio, 1, fila - filaPagoInicio, anchoTotal), '#f0f3f4', '#000000', false, 10);
+    estiloRangoVista_(hoja.getRange(filaPagoInicio, 1, fila - filaPagoInicio, anchoBase), '#f0f3f4', '#000000', false, 10);
     fila += 1;
   }
 
   // Sección Control financiero
-  hoja.getRange(fila, 1, 1, anchoTotal).merge().setValue('REPARTO FINANCIERO');
-  estiloRangoVista_(hoja.getRange(fila, 1, 1, anchoTotal), '#424949', '#ffffff', true, 12);
+  hoja.getRange(fila, 1, 1, anchoBase).merge().setValue('REPARTO FINANCIERO');
+  estiloRangoVista_(hoja.getRange(fila, 1, 1, anchoBase), '#424949', '#ffffff', true, 12);
   fila++;
 
   if (!control) {
-    hoja.getRange(fila, 1, 1, anchoTotal).merge().setValue('Aún no se ha generado el control financiero de este evento.');
+    hoja.getRange(fila, 1, 1, anchoBase).merge().setValue('Aún no se ha generado el control financiero de este evento.');
     fila += 2;
   } else {
     const filaControlInicio = fila;
-    hoja.getRange(fila, 1).setValue('Importe:'); hoja.getRange(fila, 2).setValue(control.importe);
-    hoja.getRange(fila, 3).setValue('IVA:'); hoja.getRange(fila, 4).setValue(control.iva);
-    hoja.getRange(fila, 5).setValue('Total:'); hoja.getRange(fila, 6).setValue(control.total);
+    const formatoMoneda = '_-"$"* #,##0.00_-;_-"$"* \\-#,##0.00_-;_-"$"* "-"??_-;_-@';
+    hoja.getRange(fila, 1).setValue('Importe:'); hoja.getRange(fila, 2).setValue(Number(control.importe) || 0).setNumberFormat(formatoMoneda);
+    hoja.getRange(fila, 3).setValue('IVA:'); hoja.getRange(fila, 4).setValue(Number(control.iva) || 0).setNumberFormat(formatoMoneda);
+    hoja.getRange(fila, 5).setValue('Total:'); hoja.getRange(fila, 6).setValue(Number(control.total) || 0).setNumberFormat(formatoMoneda);
     fila++;
-    hoja.getRange(fila, 1).setValue('Egresos nómina:'); hoja.getRange(fila, 2).setValue(control.egresosNomina);
-    hoja.getRange(fila, 3).setValue('Ganancia:'); hoja.getRange(fila, 4).setValue(control.ganancia);
-    hoja.getRange(fila, 5).setValue('Fondo utilidad:'); hoja.getRange(fila, 6).setValue(control.fondoUtilidad);
+    hoja.getRange(fila, 1).setValue('Egresos nómina:'); hoja.getRange(fila, 2).setValue(Number(control.egresosNomina) || 0).setNumberFormat(formatoMoneda);
+    hoja.getRange(fila, 3).setValue('Ganancia:'); hoja.getRange(fila, 4).setValue(Number(control.ganancia) || 0).setNumberFormat(formatoMoneda);
+    hoja.getRange(fila, 5).setValue('Fondo utilidad:'); hoja.getRange(fila, 6).setValue(Number(control.fondoUtilidad) || 0).setNumberFormat(formatoMoneda);
     fila++;
-    hoja.getRange(fila, 1).setValue('Neto a repartir:'); hoja.getRange(fila, 2).setValue(control.netoRepartir);
+    hoja.getRange(fila, 1).setValue('Neto a repartir:'); hoja.getRange(fila, 2).setValue(Number(control.netoRepartir) || 0).setNumberFormat(formatoMoneda);
     fila++;
-    hoja.getRange(fila, 1).setValue(control.socio1 + ':'); hoja.getRange(fila, 2).setValue(control.reparticionPorSocio);
-    hoja.getRange(fila, 3).setValue('Estatus:'); hoja.getRange(fila, 4).setValue(control.socio1Estatus);
+    hoja.getRange(fila, 1).setValue(control.socio1 + ':'); hoja.getRange(fila, 2).setValue(Number(control.reparticionPorSocio) || 0).setNumberFormat(formatoMoneda);
+    hoja.getRange(fila, 3).setValue('Estatus:'); hoja.getRange(fila, 4).setValue(String(control.socio1Estatus || ''));
     fila++;
-    hoja.getRange(fila, 1).setValue(control.socio2 + ':'); hoja.getRange(fila, 2).setValue(control.reparticionPorSocio);
-    hoja.getRange(fila, 3).setValue('Estatus:'); hoja.getRange(fila, 4).setValue(control.socio2Estatus);
+    hoja.getRange(fila, 1).setValue(control.socio2 + ':'); hoja.getRange(fila, 2).setValue(Number(control.reparticionPorSocio) || 0).setNumberFormat(formatoMoneda);
+    hoja.getRange(fila, 3).setValue('Estatus:'); hoja.getRange(fila, 4).setValue(String(control.socio2Estatus || ''));
     fila++;
     if (control.terceroNombre) {
-      hoja.getRange(fila, 1).setValue(control.terceroNombre + ':'); hoja.getRange(fila, 2).setValue(control.terceroImporte);
-      hoja.getRange(fila, 3).setValue('Estatus:'); hoja.getRange(fila, 4).setValue(control.terceroEstatus);
+      hoja.getRange(fila, 1).setValue(control.terceroNombre + ':'); hoja.getRange(fila, 2).setValue(Number(control.terceroImporte) || 0).setNumberFormat(formatoMoneda);
+      hoja.getRange(fila, 3).setValue('Estatus:'); hoja.getRange(fila, 4).setValue(String(control.terceroEstatus || ''));
       fila++;
     }
-    estiloRangoVista_(hoja.getRange(filaControlInicio, 1, fila - filaControlInicio, anchoTotal), '#f0f3f4', '#000000', false, 10);
+    estiloRangoVista_(hoja.getRange(filaControlInicio, 1, fila - filaControlInicio, anchoBase), '#f0f3f4', '#000000', false, 10);
   }
 
-  hoja.setColumnWidths(1, 8, 110);
+  // Ajuste dinámico de columnas al contenido
+  hoja.autoResizeColumns(1, Math.max(anchoTotal, hoja.getLastColumn()));
+  hoja.setColumnWidth(1, Math.max(hoja.getColumnWidth(1), 160));
+
   hoja.setFrozenRows(VISTA_FILA_INICIO_REPORTE - 1);
   libro.setActiveSheet(hoja);
 
