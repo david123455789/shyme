@@ -15,13 +15,14 @@ const SYHME = Object.freeze({
     PAGOS: 'PAGOS',
     CONTROL_FINANCIERO: 'CONTROL_FINANCIERO',
     VISTA_NOMINA: 'VISTA_NOMINA',
-    PANEL: 'PANEL',
+    GENERADOR: 'Generador',
     BITACORA: 'BITACORA',
   }),
   ESTATUS_ACTIVO: 'ACTIVO',
   ID_CARPETA_RAIZ_EVENTOS: '1r2vUndE43ync3fmBl9_cayv-QZ1a4YtP',
   PUESTO_DIRECCION: 'DIRECCIÓN',
   FRACCIONES_TURNO: Object.freeze({ '': 0, '1/2': 0.5, '12': 1, '12 1/2': 1.5, '24': 2 }),
+  TIPOS_TURNO: Object.freeze(['1/2', '12', '12 1/2', '24']),
   PALETA_DIAS: Object.freeze([
     { fondo: '#fff2cc', activo: '#bf9000' },
     { fondo: '#fce5cd', activo: '#b45f06' },
@@ -52,14 +53,6 @@ function onOpen() {
     .addItem('Catálogo de pagos', 'abrirCatalogoPagos')
     .addItem('Catálogo de control financiero', 'abrirCatalogoControlFinanciero');
 
-  const menuPanel = ui.createMenu('Panel')
-    .addItem('Abrir Panel', 'abrirPanelNomina')
-    .addSeparator()
-    .addItem('Cargar evento', 'panelCargarEvento_')
-    .addItem('Agregar empleado', 'panelAgregarEmpleado_')
-    .addItem('Guardar turnos', 'panelGuardarTurnos_')
-    .addItem('Generar nómina', 'panelGenerarNomina_');
-
   ui.createMenu('Syhme')
     .addItem('Dar de alta empleado', 'mostrarFormularioAltaEmpleado')
     .addSeparator()
@@ -81,9 +74,8 @@ function onOpen() {
     .addItem('Generar control financiero', 'mostrarFormularioControlFinanciero')
     .addSeparator()
     .addItem('Abrir Vista Nómina', 'abrirVistaNomina')
-    .addItem('Generar resumen (usar selector de la hoja)', 'vistaNominaGenerarDesdeSelector_')
     .addSeparator()
-    .addSubMenu(menuPanel)
+    .addItem('Abrir Generador', 'abrirGenerador')
     .addSeparator()
     .addSubMenu(menuAbrir)
     .addSeparator()
@@ -751,6 +743,33 @@ function mostrarFormularioAsignaciones() {
   SpreadsheetApp.getUi().showModalDialog(html, 'Syhme');
 }
 
+function crearOReutilizarAsignacion_(idEvento, idEmpleado) {
+  const libro = SpreadsheetApp.getActiveSpreadsheet();
+  const hoja = obtenerHojaObligatoria_(libro, SYHME.HOJAS.ASIGNACIONES);
+
+  const evento = obtenerEventos_().find((e) => e.id === idEvento);
+  if (!evento) throw new Error('El evento seleccionado ya no existe.');
+
+  const empleado = obtenerEmpleados_().find((e) => e.id === idEmpleado);
+  if (!empleado) throw new Error('El empleado seleccionado ya no existe.');
+
+  const existente = obtenerAsignaciones_().find((a) => a.idEvento === idEvento && a.idEmpleado === idEmpleado && a.estatus === 'ACTIVO');
+  if (existente) return existente;
+
+  const puesto = obtenerPuestos_().find((p) => p.id === empleado.idPuesto);
+  const tarifa = puesto ? puesto.tarifa : 0;
+  const nuevoId = generarId_('ASG', hoja);
+  hoja.appendRow([nuevoId, idEvento, idEmpleado, empleado.nombre, empleado.idPuesto, empleado.puesto, tarifa, 'ACTIVO', 'Agregado desde el Generador']);
+
+  registrarBitacora_({
+    modulo: 'ASIGNACIONES', accion: 'ALTA', idRegistro: nuevoId,
+    valorNuevo: JSON.stringify({ evento: evento.nombre, empleado: empleado.nombre, puesto: empleado.puesto, tarifaAcordada: tarifa }),
+    detalle: 'Asignación creada desde el Generador.',
+  });
+
+  return { id: nuevoId, idEvento, idEmpleado, empleado: empleado.nombre, idPuesto: empleado.idPuesto, puesto: empleado.puesto, tarifaAcordada: tarifa, estatus: 'ACTIVO' };
+}
+
 function guardarAsignacionDesdeFormulario(datos) {
   const id = String((datos && datos.idAsignacion) || '').trim();
   const idEvento = String((datos && datos.idEvento) || '').trim();
@@ -878,7 +897,7 @@ function mostrarFormularioTurnos() {
     eventos,
     asignaciones,
     turnos: obtenerTurnos_(),
-    tiposTurno: Object.keys(SYHME.FRACCIONES_TURNO).filter((t) => t !== ''),
+    tiposTurno: SYHME.TIPOS_TURNO,
     paleta: SYHME.PALETA_DIAS,
   }).replace(/</g, '\\u003c');
 
@@ -1021,60 +1040,79 @@ function guardarTurnosDesdeFormulario(datos) {
     if (!asignacion) return { ok: false, mensaje: 'La asignación seleccionada ya no existe.' };
     if (asignacion.idEvento !== idEvento) return { ok: false, mensaje: 'La asignación no corresponde a este evento.' };
 
-    const turnosExistentes = obtenerTurnos_().filter((t) => t.idEvento === idEvento && t.idAsignacion === idAsignacion);
-    let creados = 0;
-    let actualizados = 0;
-    let totalFracciones = 0;
-
-    turnos.forEach(({ fecha, tipo }) => {
-      const fechaIso = String(fecha || '').trim();
-      const tipoTurno = String(tipo || '').trim();
-      if (!fechaIso) return;
-
-      const fraccion = SYHME.FRACCIONES_TURNO.hasOwnProperty(tipoTurno) ? SYHME.FRACCIONES_TURNO[tipoTurno] : 0;
-      totalFracciones += fraccion;
-
-      const existente = turnosExistentes.find((t) => t.fecha === fechaIso);
-      if (existente) {
-        hoja.getRange(existente.fila, 8, 1, 2).setValues([[tipoTurno, fraccion]]);
-        actualizados++;
-      } else if (tipoTurno) {
-        const nuevoId = generarId_('TUR', hoja);
-        hoja.appendRow([
-          nuevoId, idEvento, evento.nombre, idAsignacion, asignacion.idEmpleado, asignacion.empleado,
-          fechaDesdeIso_(fechaIso), tipoTurno, fraccion, '',
-        ]);
-        creados++;
-      }
-    });
-
-    registrarBitacora_({
-      modulo: 'TURNOS', accion: 'CAPTURA', idRegistro: idAsignacion,
-      valorNuevo: JSON.stringify({ evento: evento.nombre, empleado: asignacion.empleado, diasCreados: creados, diasActualizados: actualizados, totalFracciones }),
-      detalle: 'Turnos capturados desde el formulario.',
-    });
+    guardarTurnosParaAsignacion_(hoja, evento, asignacion, turnos);
 
     return {
       ok: true,
-      mensaje: `Turnos guardados para ${asignacion.empleado}. Días nuevos: ${creados}, actualizados: ${actualizados}. Total de turnos: ${totalFracciones}.`,
+      mensaje: `Turnos guardados para ${asignacion.empleado}.`,
     };
   } finally {
     lock.releaseLock();
   }
 }
 
+function guardarTurnosParaAsignacion_(hoja, evento, asignacion, turnos) {
+  const turnosExistentes = obtenerTurnos_().filter((t) => t.idEvento === evento.id && t.idAsignacion === asignacion.id);
+  let creados = 0;
+  let actualizados = 0;
+  let totalFracciones = 0;
+
+  turnos.forEach(({ fecha, tipo }) => {
+    const fechaIso = String(fecha || '').trim();
+    const tipoTurno = String(tipo || '').trim();
+    if (!fechaIso) return;
+
+    const fraccion = SYHME.FRACCIONES_TURNO.hasOwnProperty(tipoTurno) ? SYHME.FRACCIONES_TURNO[tipoTurno] : 0;
+    totalFracciones += fraccion;
+
+    const existente = turnosExistentes.find((t) => t.fecha === fechaIso);
+    if (existente) {
+      hoja.getRange(existente.fila, 8, 1, 2).setValues([[tipoTurno, fraccion]]);
+      actualizados++;
+    } else if (tipoTurno) {
+      const nuevoId = generarId_('TUR', hoja);
+      hoja.appendRow([
+        nuevoId, evento.id, evento.nombre, asignacion.id, asignacion.idEmpleado, asignacion.empleado,
+        fechaDesdeIso_(fechaIso), tipoTurno, fraccion, '',
+      ]);
+      creados++;
+    }
+  });
+
+  registrarBitacora_({
+    modulo: 'TURNOS', accion: 'CAPTURA', idRegistro: asignacion.id,
+    valorNuevo: JSON.stringify({ evento: evento.nombre, empleado: asignacion.empleado, diasCreados: creados, diasActualizados: actualizados, totalFracciones }),
+    detalle: 'Turnos capturados.',
+  });
+
+  return { creados, actualizados, totalFracciones };
+}
+
 function obtenerTurnos_() {
   const hoja = obtenerHojaObligatoria_(SpreadsheetApp.getActiveSpreadsheet(), SYHME.HOJAS.TURNOS);
   const ultimaFila = hoja.getLastRow();
   if (ultimaFila < 2) return [];
+
+  const mapaFraccionATipo = {};
+  Object.keys(SYHME.FRACCIONES_TURNO).forEach((tipo) => {
+    if (tipo !== '') mapaFraccionATipo[SYHME.FRACCIONES_TURNO[tipo]] = tipo;
+  });
+
   return hoja.getRange(2, 1, ultimaFila - 1, 10).getValues()
     .filter((f) => f[0] && f[1])
-    .map((f, i) => ({
-      fila: i + 2, id: String(f[0]), idEvento: String(f[1]), evento: String(f[2]),
-      idAsignacion: String(f[3]), idEmpleado: String(f[4]), empleado: String(f[5]),
-      fecha: formatearFechaIso_(f[6]), tipo: String(f[7] || ''), fraccion: Number(f[8]) || 0,
-      observaciones: String(f[9] || ''),
-    }));
+    .map((f, i) => {
+      const fraccion = Number(f[8]) || 0;
+      let tipoCrudo = String(f[7] || '').trim();
+      if (!SYHME.FRACCIONES_TURNO.hasOwnProperty(tipoCrudo)) {
+        tipoCrudo = mapaFraccionATipo[fraccion] || '';
+      }
+      return {
+        fila: i + 2, id: String(f[0]), idEvento: String(f[1]), evento: String(f[2]),
+        idAsignacion: String(f[3]), idEmpleado: String(f[4]), empleado: String(f[5]),
+        fecha: formatearFechaIso_(f[6]), tipo: tipoCrudo, fraccion,
+        observaciones: String(f[9] || ''),
+      };
+    });
 }
 
 function abrirCatalogoTurnos() {
@@ -1371,7 +1409,7 @@ function generarNominaEvento_(idEvento) {
   registrarBitacora_({
     modulo: 'NOMINAS', accion: nominaExistente ? 'REGENERACION' : 'ALTA', idRegistro: idNomina,
     valorNuevo: JSON.stringify({ evento: evento.nombre, empleados: filasDetalle.length, conAbonoPrestamo: empleadosConAbono }),
-    detalle: nominaExistente ? 'Nómina regenerada desde el formulario.' : 'Nómina generada desde el formulario.',
+    detalle: nominaExistente ? 'Nómina regenerada.' : 'Nómina generada.',
   });
 
   const mensajePrestamos = empleadosConAbono > 0 ? ` Se descontaron préstamos automáticamente a ${empleadosConAbono} empleado(s).` : '';
@@ -1392,6 +1430,26 @@ function eliminarDetalleNominaPorId_(hojaDetalle, idNomina) {
       hojaDetalle.deleteRow(i + 2);
     }
   }
+}
+
+function eliminarNominaCompleta_(idEvento) {
+  const libro = SpreadsheetApp.getActiveSpreadsheet();
+  const nomina = obtenerNominas_().find((n) => n.idEvento === idEvento);
+  if (!nomina) return { ok: false, mensaje: 'Este evento no tiene una nómina generada.' };
+
+  const hojaDetalle = obtenerHojaObligatoria_(libro, SYHME.HOJAS.DETALLE_NOMINA);
+  eliminarDetalleNominaPorId_(hojaDetalle, nomina.id);
+
+  const hojaNominas = obtenerHojaObligatoria_(libro, SYHME.HOJAS.NOMINAS);
+  hojaNominas.deleteRow(nomina.fila);
+
+  registrarBitacora_({
+    modulo: 'NOMINAS', accion: 'CANCELACION', idRegistro: nomina.id,
+    valorAnterior: JSON.stringify({ evento: nomina.evento, total: nomina.totalNomina }),
+    detalle: 'Nómina cancelada y eliminada desde el Generador.',
+  });
+
+  return { ok: true, mensaje: `Nómina ${nomina.id} cancelada y eliminada.` };
 }
 
 function obtenerNominas_() {
@@ -1808,9 +1866,9 @@ function abrirCatalogoControlFinanciero() {
 
 /* ======================= VISTA_NOMINA (con selector de evento en la propia hoja + turnos por empleado) ======================= */
 
-function estiloRangoVista_(rango, fondo, fuente, negrita, size) {
+function estiloRangoVista_(rango, fondo, fuente, negrita, size, wrap) {
   rango.setBackground(fondo).setFontColor(fuente).setFontWeight(negrita ? 'bold' : 'normal')
-    .setFontFamily('Montserrat').setFontSize(size).setVerticalAlignment('middle').setWrap(true);
+    .setFontFamily('Montserrat').setFontSize(size).setVerticalAlignment('middle').setWrap(Boolean(wrap));
 }
 
 const VISTA_FILA_SELECTOR = 1;
@@ -1843,31 +1901,6 @@ function abrirVistaNomina() {
   libro.setActiveSheet(hoja);
 }
 
-function vistaNominaGenerarDesdeSelector_() {
-  const libro = SpreadsheetApp.getActiveSpreadsheet();
-  const hoja = obtenerHojaObligatoria_(libro, SYHME.HOJAS.VISTA_NOMINA);
-  if (String(hoja.getRange(VISTA_FILA_SELECTOR, 1).getValue()) !== 'Seleccionar evento:') {
-    inicializarVistaNomina_(hoja);
-  }
-
-  const valorCelda = String(hoja.getRange(VISTA_FILA_SELECTOR, 2).getValue() || '').trim();
-  const idEvento = valorCelda.split('—')[0].trim();
-  if (!idEvento) { SpreadsheetApp.getUi().alert('Selecciona un evento en la celda B1.'); return; }
-
-  const lock = LockService.getDocumentLock();
-  if (!lock.tryLock(20000)) { SpreadsheetApp.getUi().alert('El sistema está ocupado. Intenta nuevamente.'); return; }
-
-  let resultado;
-  try {
-    resultado = generarVistaNominaEvento_(idEvento);
-  } finally {
-    lock.releaseLock();
-  }
-
-  if (!resultado.ok) SpreadsheetApp.getUi().alert(resultado.mensaje);
-  else SpreadsheetApp.getActive().toast(resultado.mensaje, 'Syhme', 5);
-}
-
 function generarVistaNominaEvento_(idEvento) {
   const evento = obtenerEventos_().find((e) => e.id === idEvento);
   if (!evento) return { ok: false, mensaje: 'El evento seleccionado ya no existe.' };
@@ -1879,7 +1912,6 @@ function generarVistaNominaEvento_(idEvento) {
   const maxColumnas = hoja.getMaxColumns();
   const rangoReporte = hoja.getRange(VISTA_FILA_INICIO_REPORTE, 1, maxFilas - VISTA_FILA_INICIO_REPORTE + 1, maxColumnas);
   rangoReporte.clearContent().clearFormat().clearDataValidations();
-  // Fuerza formato de texto plano para evitar que Sheets interprete cualquier valor como fecha/número.
   rangoReporte.setNumberFormat('@');
 
   const rangoSelectorActual = hoja.getRange(VISTA_FILA_SELECTOR, 2);
@@ -1910,12 +1942,10 @@ function generarVistaNominaEvento_(idEvento) {
 
   let fila = VISTA_FILA_INICIO_REPORTE;
 
-  // Título
   hoja.getRange(fila, 1, 1, anchoTotal).merge().setValue(`RESUMEN DE EVENTO — ${evento.nombre}`);
-  estiloRangoVista_(hoja.getRange(fila, 1, 1, anchoTotal), '#2d516a', '#ffffff', true, 14);
+  estiloRangoVista_(hoja.getRange(fila, 1, 1, anchoTotal), '#2d516a', '#ffffff', true, 14, true);
   fila += 2;
 
-  // Datos generales
   const filaInicio = fila;
   hoja.getRange(fila, 1).setValue('Cliente:'); hoja.getRange(fila, 2, 1, 3).merge().setValue(cliente ? cliente.nombre : '—');
   hoja.getRange(fila, 5).setValue('Estatus:'); hoja.getRange(fila, 6, 1, 3).merge().setValue(evento.estatus);
@@ -1923,15 +1953,14 @@ function generarVistaNominaEvento_(idEvento) {
   hoja.getRange(fila, 1).setValue('Fecha inicio:'); hoja.getRange(fila, 2).setValue(evento.inicio);
   hoja.getRange(fila, 3).setValue('Fecha fin:'); hoja.getRange(fila, 4).setValue(evento.fin);
   fila++;
-  estiloRangoVista_(hoja.getRange(filaInicio, 1, fila - filaInicio, anchoBase), '#f0f3f4', '#000000', false, 10);
+  estiloRangoVista_(hoja.getRange(filaInicio, 1, fila - filaInicio, anchoBase), '#f0f3f4', '#000000', false, 10, false);
   hoja.getRange(filaInicio, 1, fila - filaInicio, 1).setFontWeight('bold');
   hoja.getRange(filaInicio, 3, fila - filaInicio, 1).setFontWeight('bold');
   hoja.getRange(filaInicio, 5, fila - filaInicio, 1).setFontWeight('bold');
   fila += 1;
 
-  // Sección Nómina
   hoja.getRange(fila, 1, 1, anchoBase).merge().setValue('DETALLE DE NÓMINA');
-  estiloRangoVista_(hoja.getRange(fila, 1, 1, anchoBase), '#424949', '#ffffff', true, 12);
+  estiloRangoVista_(hoja.getRange(fila, 1, 1, anchoBase), '#424949', '#ffffff', true, 12, true);
   fila++;
 
   if (!nomina || !detalle.length) {
@@ -1941,7 +1970,7 @@ function generarVistaNominaEvento_(idEvento) {
     const encabezados = [['Empleado', 'Puesto', 'Tarifa', 'Turnos', 'Subtotal', 'Préstamo', 'Total a pagar', 'Estatus']];
     const rangoEncabezados = hoja.getRange(fila, 1, 1, anchoBase);
     rangoEncabezados.setValues(encabezados);
-    estiloRangoVista_(rangoEncabezados, '#666666', '#ffffff', true, 9);
+    estiloRangoVista_(rangoEncabezados, '#666666', '#ffffff', true, 9, false);
     fila++;
 
     const filaDatosInicio = fila;
@@ -1956,18 +1985,17 @@ function generarVistaNominaEvento_(idEvento) {
       hoja.getRange(fila, 8).setValue(String(d.estatusPago || ''));
       fila++;
     });
-    estiloRangoVista_(hoja.getRange(filaDatosInicio, 1, detalle.length, anchoBase), '#ffffff', '#000000', false, 9);
+    estiloRangoVista_(hoja.getRange(filaDatosInicio, 1, detalle.length, anchoBase), '#ffffff', '#000000', false, 9, false);
 
     hoja.getRange(fila, 1, 1, 6).merge().setValue('Total nómina');
     hoja.getRange(fila, 7).setValue(`=SUM(G${filaDatosInicio}:G${fila - 1})`);
     hoja.getRange(fila, 7).setNumberFormat('_-"$"* #,##0.00_-;_-"$"* \\-#,##0.00_-;_-"$"* "-"??_-;_-@');
-    estiloRangoVista_(hoja.getRange(fila, 1, 1, anchoBase), '#424949', '#ffffff', true, 9);
+    estiloRangoVista_(hoja.getRange(fila, 1, 1, anchoBase), '#424949', '#ffffff', true, 9, false);
     fila += 2;
   }
 
-  // Sección TURNOS POR EMPLEADO (cuadrícula día por día, coloreada, texto plano)
   hoja.getRange(fila, 1, 1, anchoTotal).merge().setValue('TURNOS POR EMPLEADO');
-  estiloRangoVista_(hoja.getRange(fila, 1, 1, anchoTotal), '#424949', '#ffffff', true, 12);
+  estiloRangoVista_(hoja.getRange(fila, 1, 1, anchoTotal), '#424949', '#ffffff', true, 12, true);
   fila++;
 
   if (!asignacionesOrdenadas.length || !dias.length) {
@@ -1979,7 +2007,7 @@ function generarVistaNominaEvento_(idEvento) {
 
     const celdaEncabezadoEmpleado = hoja.getRange(filaEncabezadoTurnos, 1);
     celdaEncabezadoEmpleado.setValue('Empleado');
-    estiloRangoVista_(celdaEncabezadoEmpleado, '#666666', '#ffffff', true, 9);
+    estiloRangoVista_(celdaEncabezadoEmpleado, '#666666', '#ffffff', true, 9, false);
 
     dias.forEach((fechaIso, indiceDia) => {
       const color = SYHME.PALETA_DIAS[indiceDia % SYHME.PALETA_DIAS.length];
@@ -1987,14 +2015,14 @@ function generarVistaNominaEvento_(idEvento) {
       const etiqueta = `${String(fechaObj.getDate()).padStart(2, '0')} ${nombresDias[fechaObj.getDay()]}`;
       const celda = hoja.getRange(filaEncabezadoTurnos, 2 + indiceDia);
       celda.setValue(etiqueta);
-      estiloRangoVista_(celda, color.activo, '#ffffff', true, 8);
+      estiloRangoVista_(celda, color.activo, '#ffffff', true, 8, false);
     });
     fila++;
 
     asignacionesOrdenadas.forEach((a) => {
       const celdaNombre = hoja.getRange(fila, 1);
       celdaNombre.setValue(`${a.empleado} (${a.puesto})`);
-      estiloRangoVista_(celdaNombre, '#ffffff', '#000000', true, 9);
+      estiloRangoVista_(celdaNombre, '#ffffff', '#000000', true, 9, false);
 
       dias.forEach((fechaIso, indiceDia) => {
         const color = SYHME.PALETA_DIAS[indiceDia % SYHME.PALETA_DIAS.length];
@@ -2002,21 +2030,20 @@ function generarVistaNominaEvento_(idEvento) {
         const valorTurno = turno && turno.tipo ? String(turno.tipo).trim() : '—';
         const celda = hoja.getRange(fila, 2 + indiceDia);
         celda.setValue(valorTurno);
-        estiloRangoVista_(celda, color.fondo, '#000000', false, 9);
+        estiloRangoVista_(celda, color.fondo, '#000000', false, 9, false);
       });
       fila++;
     });
     fila += 1;
   }
 
-  // Sección Préstamos abonados en esta nómina
   if (movimientosNomina.length) {
     hoja.getRange(fila, 1, 1, anchoBase).merge().setValue('PRÉSTAMOS ABONADOS EN ESTA NÓMINA');
-    estiloRangoVista_(hoja.getRange(fila, 1, 1, anchoBase), '#424949', '#ffffff', true, 12);
+    estiloRangoVista_(hoja.getRange(fila, 1, 1, anchoBase), '#424949', '#ffffff', true, 12, true);
     fila++;
 
     hoja.getRange(fila, 1, 1, 4).setValues([['Empleado', 'Importe abonado', 'Saldo resultante', '']]);
-    estiloRangoVista_(hoja.getRange(fila, 1, 1, 4), '#666666', '#ffffff', true, 9);
+    estiloRangoVista_(hoja.getRange(fila, 1, 1, 4), '#666666', '#ffffff', true, 9, false);
     fila++;
 
     movimientosNomina.forEach((m) => {
@@ -2028,9 +2055,8 @@ function generarVistaNominaEvento_(idEvento) {
     fila += 1;
   }
 
-  // Sección Pago del cliente
   hoja.getRange(fila, 1, 1, anchoBase).merge().setValue('PAGO DEL CLIENTE');
-  estiloRangoVista_(hoja.getRange(fila, 1, 1, anchoBase), '#424949', '#ffffff', true, 12);
+  estiloRangoVista_(hoja.getRange(fila, 1, 1, anchoBase), '#424949', '#ffffff', true, 12, true);
   fila++;
 
   if (!pago) {
@@ -2048,13 +2074,12 @@ function generarVistaNominaEvento_(idEvento) {
     hoja.getRange(fila, 4).setValue(Number(pago.importeFiniquito) || 0).setNumberFormat('_-"$"* #,##0.00_-;_-"$"* \\-#,##0.00_-;_-"$"* "-"??_-;_-@');
     hoja.getRange(fila, 5).setValue('Pagado:'); hoja.getRange(fila, 6).setValue(String(pago.finiquitoPagado || ''));
     fila++;
-    estiloRangoVista_(hoja.getRange(filaPagoInicio, 1, fila - filaPagoInicio, anchoBase), '#f0f3f4', '#000000', false, 10);
+    estiloRangoVista_(hoja.getRange(filaPagoInicio, 1, fila - filaPagoInicio, anchoBase), '#f0f3f4', '#000000', false, 10, false);
     fila += 1;
   }
 
-  // Sección Control financiero
   hoja.getRange(fila, 1, 1, anchoBase).merge().setValue('REPARTO FINANCIERO');
-  estiloRangoVista_(hoja.getRange(fila, 1, 1, anchoBase), '#424949', '#ffffff', true, 12);
+  estiloRangoVista_(hoja.getRange(fila, 1, 1, anchoBase), '#424949', '#ffffff', true, 12, true);
   fila++;
 
   if (!control) {
@@ -2084,12 +2109,11 @@ function generarVistaNominaEvento_(idEvento) {
       hoja.getRange(fila, 3).setValue('Estatus:'); hoja.getRange(fila, 4).setValue(String(control.terceroEstatus || ''));
       fila++;
     }
-    estiloRangoVista_(hoja.getRange(filaControlInicio, 1, fila - filaControlInicio, anchoBase), '#f0f3f4', '#000000', false, 10);
+    estiloRangoVista_(hoja.getRange(filaControlInicio, 1, fila - filaControlInicio, anchoBase), '#f0f3f4', '#000000', false, 10, false);
   }
 
-  // Ajuste dinámico de columnas al contenido
-  hoja.autoResizeColumns(1, Math.max(anchoTotal, hoja.getLastColumn()));
-  hoja.setColumnWidth(1, Math.max(hoja.getColumnWidth(1), 160));
+  hoja.autoResizeColumns(1, hoja.getMaxColumns());
+  hoja.setColumnWidth(1, Math.max(hoja.getColumnWidth(1), 170));
 
   hoja.setFrozenRows(VISTA_FILA_INICIO_REPORTE - 1);
   libro.setActiveSheet(hoja);
@@ -2105,135 +2129,154 @@ function generarVistaNominaEvento_(idEvento) {
 
 /* ======================= FIN VISTA_NOMINA ======================= */
 
-/* ======================= PANEL (todo en una sola hoja: evento + personal + turnos + nómina) ======================= */
+/* ======================= GENERADOR (evento + estadísticas + asignaciones + turnos, todo en una hoja) ======================= */
 
-const PANEL_FILA_EVENTO = 3;
-const PANEL_FILA_AGREGAR = 4;
-const PANEL_FILA_ENCABEZADO_DIAS = 6;
-const PANEL_FILA_ENCABEZADO_TABLA = 7;
-const PANEL_FILA_PRIMER_EMPLEADO = 8;
-const PANEL_COL_INDICE = 1;
-const PANEL_COL_ID_ASIGNACION = 2;
-const PANEL_COL_ID_EMPLEADO = 3;
-const PANEL_COL_NOMBRE = 4;
-const PANEL_COL_PUESTO = 5;
-const PANEL_COL_TARIFA = 6;
-const PANEL_COL_DIAS_INICIO = 7;
-const PANEL_CELDA_EVENTO_CARGADO = 'Z1';
-const PANEL_TIPOS_TURNO = ['1/2', '12', '12 1/2', '24'];
+const GEN_FILA_EVENTO = 5;
+const GEN_FILA_FECHA_INICIO = 9;
+const GEN_FILA_FECHA_FIN = 11;
+const GEN_FILA_DIAS = 13;
+const GEN_FILA_ELEM_CANTIDAD = 16;
+const GEN_FILA_ELEM_COSTO = 17;
+const GEN_FILA_COORD_CANTIDAD = 20;
+const GEN_FILA_COORD_COSTO = 21;
+const GEN_FILA_SLOT1_NOMBRE = 24;
+const GEN_FILA_SLOT1_PUESTO = 26;
+const GEN_FILA_SLOT2_NOMBRE = 30;
+const GEN_FILA_SLOT2_PUESTO = 33;
+const GEN_FILA_TRIGGER_ASIGNAR = 24;
+const GEN_COL_TRIGGER_ASIGNAR = 6; // F24
+const GEN_FILA_TRIGGER_CREAR = 38;
+const GEN_COL_TRIGGER_CREAR = 6; // F38
+const GEN_FILA_TRIGGER_CANCELAR = 38;
+const GEN_COL_TRIGGER_CANCELAR = 7; // G38
+const GEN_FILA_ENCABEZADO_GRID = 42;
+const GEN_FILA_PRIMER_EMPLEADO_GRID = 43;
+const GEN_COL_TURNOS_INICIO = 4; // D
+const GEN_CELDA_EVENTO_ACTUAL = 'Z1';
 
-function abrirPanelNomina() {
+function abrirGenerador() {
   const libro = SpreadsheetApp.getActiveSpreadsheet();
-  const hoja = obtenerHojaObligatoria_(libro, SYHME.HOJAS.PANEL);
-  inicializarPanel_(hoja);
-  refrescarListasPanel_(hoja);
+  const hoja = obtenerHojaObligatoria_(libro, SYHME.HOJAS.GENERADOR);
+  generadorRefrescarListas_(hoja);
+  generadorAsegurarTriggers_(hoja);
   libro.setActiveSheet(hoja);
 }
 
-function inicializarPanel_(hoja) {
-  if (hoja.getRange('A1').getValue() !== '') return;
-
-  hoja.getRange(1, 1, 1, 6).merge().setValue('PANEL DE NÓMINA');
-  estiloRangoVista_(hoja.getRange(1, 1, 1, 6), '#2d516a', '#ffffff', true, 16);
-
-  hoja.getRange(PANEL_FILA_EVENTO, 1).setValue('Evento:').setFontWeight('bold');
-  hoja.getRange(PANEL_FILA_AGREGAR, 1).setValue('Agregar empleado:').setFontWeight('bold');
-
-  hoja.getRange(2, 1, 1, 6).merge().setValue('Usa el menú Syhme → Panel para Cargar evento, Agregar empleado, Guardar turnos y Generar nómina.');
-  hoja.getRange(2, 1).setFontStyle('italic').setFontColor('#546e7a').setFontSize(9);
-
-  hoja.setColumnWidth(1, 160);
-  hoja.setColumnWidth(2, 260);
-  hoja.setColumnWidths(3, 4, 90);
-}
-
-function refrescarListasPanel_(hoja) {
+function generadorRefrescarListas_(hoja) {
   const eventos = obtenerEventos_().filter((e) => e.estatus !== 'CANCELADO');
   const listaEventos = eventos.map((e) => `${e.id} — ${e.nombre} — ${e.inicio} a ${e.fin}`);
-  const celdaEvento = hoja.getRange(PANEL_FILA_EVENTO, 2);
+  const celdaEvento = hoja.getRange(GEN_FILA_EVENTO, 2, 1, 2);
+  celdaEvento.breakApart();
+  const celdaEventoDropdown = hoja.getRange(GEN_FILA_EVENTO, 2);
   if (listaEventos.length) {
-    celdaEvento.setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(listaEventos, true).setAllowInvalid(false).build());
+    celdaEventoDropdown.setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(listaEventos, true).setAllowInvalid(false).build());
   }
+  celdaEvento.merge();
 
   const empleados = obtenerEmpleadosActivos_();
   const listaEmpleados = empleados.map((e) => `${e.id} — ${e.nombre} (${e.puesto})`);
-  const celdaEmpleado = hoja.getRange(PANEL_FILA_AGREGAR, 2);
-  if (listaEmpleados.length) {
-    celdaEmpleado.setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(listaEmpleados, true).setAllowInvalid(false).build());
+  [GEN_FILA_SLOT1_NOMBRE, GEN_FILA_SLOT2_NOMBRE].forEach((fila) => {
+    const celda = hoja.getRange(fila, 3);
+    celda.breakApart();
+    if (listaEmpleados.length) {
+      celda.setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(listaEmpleados, true).setAllowInvalid(false).build());
+    }
+  });
+
+  [GEN_FILA_SLOT1_PUESTO, GEN_FILA_SLOT2_PUESTO].forEach((filaPuesto, indice) => {
+    const filaNombre = indice === 0 ? GEN_FILA_SLOT1_NOMBRE : GEN_FILA_SLOT2_NOMBRE;
+    const celdaPuesto = hoja.getRange(filaPuesto, 3);
+    celdaPuesto.breakApart().clearDataValidations();
+    celdaPuesto.setFormula(`=IFERROR(REGEXEXTRACT(C${filaNombre},"\\((.*)\\)"),"")`);
+  });
+}
+
+function generadorAsegurarTriggers_(hoja) {
+  const asignar = hoja.getRange(GEN_FILA_TRIGGER_ASIGNAR, GEN_COL_TRIGGER_ASIGNAR);
+  if (asignar.getDataValidation() === null) {
+    asignar.insertCheckboxes();
+    hoja.getRange(GEN_FILA_TRIGGER_ASIGNAR - 1, GEN_COL_TRIGGER_ASIGNAR).setValue('✅ Agregar asignaciones').setFontWeight('bold').setFontSize(9);
+  }
+  const crear = hoja.getRange(GEN_FILA_TRIGGER_CREAR, GEN_COL_TRIGGER_CREAR);
+  if (crear.getDataValidation() === null) {
+    crear.insertCheckboxes();
+    hoja.getRange(GEN_FILA_TRIGGER_CREAR - 1, GEN_COL_TRIGGER_CREAR).setValue('✅ Crear nómina').setFontWeight('bold').setFontSize(9);
+  }
+  const cancelar = hoja.getRange(GEN_FILA_TRIGGER_CANCELAR, GEN_COL_TRIGGER_CANCELAR);
+  if (cancelar.getDataValidation() === null) {
+    cancelar.insertCheckboxes();
+    hoja.getRange(GEN_FILA_TRIGGER_CANCELAR - 1, GEN_COL_TRIGGER_CANCELAR).setValue('✅ Cancelar nómina').setFontWeight('bold').setFontSize(9);
   }
 }
 
-function parseIdDesdeCeldaPanel_(valor) {
+function generadorParseId_(valor) {
   return String(valor || '').split('—')[0].trim();
 }
 
-function fechasEntreServidor_(inicioIso, finIso) {
-  const dias = [];
-  let actual = fechaDesdeIso_(inicioIso);
-  const fin = fechaDesdeIso_(finIso);
-  if (!actual || !fin) return dias;
-  while (actual <= fin) {
-    dias.push(formatearFechaIso_(actual));
-    actual = new Date(actual.getFullYear(), actual.getMonth(), actual.getDate() + 1, 12);
-  }
-  return dias;
-}
+function generadorActualizarEvento_(hoja) {
+  const idEvento = generadorParseId_(hoja.getRange(GEN_FILA_EVENTO, 2).getValue());
+  hoja.getRange(GEN_CELDA_EVENTO_ACTUAL).setValue(idEvento);
 
-function obtenerUltimaFilaPanel_(hoja) {
-  let fila = PANEL_FILA_PRIMER_EMPLEADO - 1;
-  let cursor = PANEL_FILA_PRIMER_EMPLEADO;
-  while (String(hoja.getRange(cursor, PANEL_COL_INDICE).getValue()) !== '') {
-    fila = cursor;
-    cursor++;
+  if (!idEvento) {
+    [GEN_FILA_FECHA_INICIO, GEN_FILA_FECHA_FIN, GEN_FILA_DIAS, GEN_FILA_ELEM_CANTIDAD, GEN_FILA_ELEM_COSTO, GEN_FILA_COORD_CANTIDAD, GEN_FILA_COORD_COSTO]
+      .forEach((fila) => hoja.getRange(fila, 3).clearContent());
+    generadorLimpiarGrid_(hoja);
+    return;
   }
-  return fila;
-}
 
-function buscarFilaAsignacionEnPanel_(hoja, idAsignacion) {
-  const ultimaFila = obtenerUltimaFilaPanel_(hoja);
-  for (let fila = PANEL_FILA_PRIMER_EMPLEADO; fila <= ultimaFila; fila++) {
-    if (String(hoja.getRange(fila, PANEL_COL_ID_ASIGNACION).getValue()) === idAsignacion) return fila;
-  }
-  return -1;
-}
-
-function construyeTablaPanel_(hoja, idEvento) {
   const evento = obtenerEventos_().find((e) => e.id === idEvento);
-  if (!evento) throw new Error('El evento seleccionado ya no existe.');
+  if (!evento) return;
 
+  const dias = fechasEntreServidor_(evento.inicio, evento.fin);
+  hoja.getRange(GEN_FILA_FECHA_INICIO, 3).setValue(evento.inicio);
+  hoja.getRange(GEN_FILA_FECHA_FIN, 3).setValue(evento.fin);
+  hoja.getRange(GEN_FILA_DIAS, 3).setValue(dias.length);
+
+  const asignaciones = obtenerAsignacionesActivasPorEvento_(idEvento);
+  const cantidadElem = asignaciones.filter((a) => claveTexto_(a.puesto) === claveTexto_('ELEMENTO')).length;
+  const cantidadCoord = asignaciones.filter((a) => claveTexto_(a.puesto) === claveTexto_('COORDINADOR')).length;
+
+  hoja.getRange(GEN_FILA_ELEM_CANTIDAD, 3).setValue(cantidadElem);
+  hoja.getRange(GEN_FILA_ELEM_COSTO, 3).setValue(obtenerTarifaPredeterminada_('ELEMENTO') || 0);
+  hoja.getRange(GEN_FILA_COORD_CANTIDAD, 3).setValue(cantidadCoord);
+  hoja.getRange(GEN_FILA_COORD_COSTO, 3).setValue(obtenerTarifaPredeterminada_('COORDINADOR') || 0);
+
+  generadorConstruirGrid_(hoja, idEvento);
+}
+
+function generadorLimpiarGrid_(hoja) {
   const maxFilas = hoja.getMaxRows();
   const maxColumnas = hoja.getMaxColumns();
-  hoja.getRange(PANEL_FILA_ENCABEZADO_DIAS, 1, maxFilas - PANEL_FILA_ENCABEZADO_DIAS + 1, maxColumnas)
+  hoja.getRange(GEN_FILA_ENCABEZADO_GRID, 1, maxFilas - GEN_FILA_ENCABEZADO_GRID + 1, maxColumnas)
     .clearContent().clearFormat().clearDataValidations();
-  hoja.showColumns(1, maxColumnas);
+  hoja.getRange(GEN_FILA_ENCABEZADO_GRID, 1).setValue('Indice');
+  hoja.getRange(GEN_FILA_ENCABEZADO_GRID, 2).setValue('Nombre');
+  hoja.getRange(GEN_FILA_ENCABEZADO_GRID, 3).setValue('Puesto');
+  hoja.getRange(GEN_FILA_ENCABEZADO_GRID, 1, 1, 3).setFontWeight('bold');
+}
 
-  hoja.getRange(PANEL_CELDA_EVENTO_CARGADO).setValue(idEvento);
+function generadorConstruirGrid_(hoja, idEvento) {
+  generadorLimpiarGrid_(hoja);
+
+  const evento = obtenerEventos_().find((e) => e.id === idEvento);
+  if (!evento) return;
 
   const dias = fechasEntreServidor_(evento.inicio, evento.fin);
   const nombresDias = ['Domingo', 'Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado'];
 
   dias.forEach((fechaIso, indice) => {
     const color = SYHME.PALETA_DIAS[indice % SYHME.PALETA_DIAS.length];
-    const colBase = PANEL_COL_DIAS_INICIO + indice * 4;
+    const colBase = GEN_COL_TURNOS_INICIO + indice * 4;
     const fechaObj = fechaDesdeIso_(fechaIso);
     const etiqueta = `${String(fechaObj.getDate()).padStart(2, '0')} ${nombresDias[fechaObj.getDay()]}`;
-    const rangoEncabezadoDia = hoja.getRange(PANEL_FILA_ENCABEZADO_DIAS, colBase, 1, 4);
+    const rangoEncabezadoDia = hoja.getRange(GEN_FILA_ENCABEZADO_GRID - 1, colBase, 1, 4);
     rangoEncabezadoDia.merge().setValue(etiqueta);
-    estiloRangoVista_(rangoEncabezadoDia, color.activo, '#ffffff', true, 9);
+    estiloRangoVista_(rangoEncabezadoDia, color.activo, '#ffffff', true, 9, false);
 
-    const rangoTiposTurno = hoja.getRange(PANEL_FILA_ENCABEZADO_TABLA, colBase, 1, 4);
-    rangoTiposTurno.setValues([PANEL_TIPOS_TURNO]);
-    estiloRangoVista_(rangoTiposTurno, color.fondo, '#000000', true, 8);
+    const rangoTipos = hoja.getRange(GEN_FILA_ENCABEZADO_GRID, colBase, 1, 4);
+    rangoTipos.setValues([SYHME.TIPOS_TURNO]);
+    estiloRangoVista_(rangoTipos, color.fondo, '#000000', true, 8, false);
   });
-
-  const colTotalTurnos = PANEL_COL_DIAS_INICIO + dias.length * 4;
-  const colSubtotal = colTotalTurnos + 1;
-
-  const encabezadosFijos = [['#', 'ID_ASIG', 'ID_EMP', 'Nombre', 'Puesto', 'Tarifa']];
-  hoja.getRange(PANEL_FILA_ENCABEZADO_TABLA, 1, 1, 6).setValues(encabezadosFijos);
-  hoja.getRange(PANEL_FILA_ENCABEZADO_TABLA, colTotalTurnos, 1, 2).setValues([['Total turnos', 'Subtotal']]);
-  estiloRangoVista_(hoja.getRange(PANEL_FILA_ENCABEZADO_TABLA, 1, 1, 6), '#424949', '#ffffff', true, 9);
-  estiloRangoVista_(hoja.getRange(PANEL_FILA_ENCABEZADO_TABLA, colTotalTurnos, 1, 2), '#424949', '#ffffff', true, 9);
 
   const asignaciones = obtenerAsignacionesActivasPorEvento_(idEvento);
   const puestos = obtenerPuestos_();
@@ -2245,227 +2288,110 @@ function construyeTablaPanel_(hoja, idEvento) {
   }).sort((x, y) => x.orden - y.orden || x.empleado.localeCompare(y.empleado, 'es'));
 
   ordenadas.forEach((a, indiceFila) => {
-    const fila = PANEL_FILA_PRIMER_EMPLEADO + indiceFila;
-    hoja.getRange(fila, 1, 1, 6).setValues([[indiceFila + 1, a.id, a.idEmpleado, a.empleado, a.puesto, a.tarifaAcordada]]);
+    const fila = GEN_FILA_PRIMER_EMPLEADO_GRID + indiceFila;
+    hoja.getRange(fila, 1).setValue(indiceFila + 1);
+    hoja.getRange(fila, 2).setValue(a.empleado);
+    hoja.getRange(fila, 3).setValue(a.puesto);
 
-    let totalTurnos = 0;
     dias.forEach((fechaIso, indiceDia) => {
       const color = SYHME.PALETA_DIAS[indiceDia % SYHME.PALETA_DIAS.length];
-      const colBase = PANEL_COL_DIAS_INICIO + indiceDia * 4;
-      PANEL_TIPOS_TURNO.forEach((tipo, indiceTipo) => {
+      const colBase = GEN_COL_TURNOS_INICIO + indiceDia * 4;
+      SYHME.TIPOS_TURNO.forEach((tipo, indiceTipo) => {
         const celda = hoja.getRange(fila, colBase + indiceTipo);
         celda.insertCheckboxes();
         const existente = turnos.find((t) => t.idAsignacion === a.id && t.fecha === fechaIso && t.tipo === tipo);
         celda.setValue(Boolean(existente));
         celda.setBackground(color.fondo);
-        if (existente) totalTurnos += SYHME.FRACCIONES_TURNO[tipo] || 0;
       });
     });
-
-    const subtotal = a.tarifaAcordada * totalTurnos;
-    hoja.getRange(fila, colTotalTurnos).setValue(totalTurnos);
-    hoja.getRange(fila, colSubtotal).setValue(subtotal).setNumberFormat('_-"$"* #,##0.00_-;_-"$"* \\-#,##0.00_-;_-"$"* "-"??_-;_-@');
   });
 
-  hoja.setColumnWidths(PANEL_COL_DIAS_INICIO, dias.length * 4, 34);
-  hoja.setColumnWidth(colTotalTurnos, 90);
-  hoja.setColumnWidth(colSubtotal, 100);
-  hoja.setFrozenRows(PANEL_FILA_ENCABEZADO_TABLA);
-  hoja.setFrozenColumns(6);
-  hoja.hideColumns(PANEL_COL_ID_ASIGNACION, 2);
+  hoja.setColumnWidths(GEN_COL_TURNOS_INICIO, dias.length * 4, 34);
+  hoja.setFrozenRows(GEN_FILA_ENCABEZADO_GRID);
+  hoja.setFrozenColumns(3);
 }
 
-function panelCargarEvento_() {
-  const libro = SpreadsheetApp.getActiveSpreadsheet();
-  const hoja = obtenerHojaObligatoria_(libro, SYHME.HOJAS.PANEL);
-  const idEvento = parseIdDesdeCeldaPanel_(hoja.getRange(PANEL_FILA_EVENTO, 2).getValue());
-  if (!idEvento) { SpreadsheetApp.getUi().alert('Selecciona un evento en la celda B3.'); return; }
-
-  const lock = LockService.getDocumentLock();
-  if (!lock.tryLock(20000)) { SpreadsheetApp.getUi().alert('El sistema está ocupado. Intenta nuevamente.'); return; }
-
-  try {
-    construyeTablaPanel_(hoja, idEvento);
-    refrescarListasPanel_(hoja);
-    SpreadsheetApp.getActive().toast('Evento cargado en el Panel.', 'Syhme', 5);
-  } catch (error) {
-    SpreadsheetApp.getUi().alert(error.message || 'No fue posible cargar el evento.');
-  } finally {
-    lock.releaseLock();
-  }
-}
-
-function panelAgregarEmpleado_() {
-  const libro = SpreadsheetApp.getActiveSpreadsheet();
-  const hoja = obtenerHojaObligatoria_(libro, SYHME.HOJAS.PANEL);
-  const idEventoCargado = String(hoja.getRange(PANEL_CELDA_EVENTO_CARGADO).getValue() || '').trim();
-  const idEventoSeleccionado = parseIdDesdeCeldaPanel_(hoja.getRange(PANEL_FILA_EVENTO, 2).getValue());
-
-  if (!idEventoCargado || idEventoCargado !== idEventoSeleccionado) {
-    SpreadsheetApp.getUi().alert('Primero usa "Cargar evento" para este evento.');
+function generadorAgregarAsignaciones_(hoja) {
+  const idEvento = String(hoja.getRange(GEN_CELDA_EVENTO_ACTUAL).getValue() || '').trim();
+  if (!idEvento) {
+    SpreadsheetApp.getActive().toast('Selecciona primero un evento en C5.', 'Syhme', 5);
     return;
   }
 
-  const idEmpleado = parseIdDesdeCeldaPanel_(hoja.getRange(PANEL_FILA_AGREGAR, 2).getValue());
-  if (!idEmpleado) { SpreadsheetApp.getUi().alert('Selecciona un empleado en la celda B4.'); return; }
+  const slots = [
+    { fila: GEN_FILA_SLOT1_NOMBRE },
+    { fila: GEN_FILA_SLOT2_NOMBRE },
+  ];
 
-  const lock = LockService.getDocumentLock();
-  if (!lock.tryLock(20000)) { SpreadsheetApp.getUi().alert('El sistema está ocupado. Intenta nuevamente.'); return; }
-
-  try {
-    const empleado = obtenerEmpleados_().find((e) => e.id === idEmpleado);
-    if (!empleado) { SpreadsheetApp.getUi().alert('El empleado seleccionado ya no existe.'); return; }
-
-    let asignacion = obtenerAsignaciones_().find((a) => a.idEvento === idEventoCargado && a.idEmpleado === idEmpleado && a.estatus === 'ACTIVO');
-
-    if (!asignacion) {
-      const hojaAsig = obtenerHojaObligatoria_(libro, SYHME.HOJAS.ASIGNACIONES);
-      const nuevoId = generarId_('ASG', hojaAsig);
-      const puesto = obtenerPuestos_().find((p) => p.id === empleado.idPuesto);
-      const tarifa = puesto ? puesto.tarifa : 0;
-      hojaAsig.appendRow([nuevoId, idEventoCargado, idEmpleado, empleado.nombre, empleado.idPuesto, empleado.puesto, tarifa, 'ACTIVO', 'Agregado desde el Panel']);
-      registrarBitacora_({
-        modulo: 'ASIGNACIONES', accion: 'ALTA', idRegistro: nuevoId,
-        valorNuevo: JSON.stringify({ evento: idEventoCargado, empleado: empleado.nombre, tarifaAcordada: tarifa }),
-        detalle: 'Asignación creada desde el Panel.',
-      });
-      asignacion = { id: nuevoId, idEmpleado, empleado: empleado.nombre, idPuesto: empleado.idPuesto, puesto: empleado.puesto, tarifaAcordada: tarifa };
+  let agregados = 0;
+  slots.forEach((slot) => {
+    const idEmpleado = generadorParseId_(hoja.getRange(slot.fila, 3).getValue());
+    if (!idEmpleado) return;
+    try {
+      crearOReutilizarAsignacion_(idEvento, idEmpleado);
+      agregados++;
+    } catch (error) {
+      SpreadsheetApp.getActive().toast(error.message || 'No fue posible agregar la asignación.', 'Syhme', 6);
     }
+  });
 
-    if (buscarFilaAsignacionEnPanel_(hoja, asignacion.id) !== -1) {
-      SpreadsheetApp.getUi().alert(`${asignacion.empleado} ya está en la tabla del Panel.`);
-      return;
-    }
+  hoja.getRange(GEN_FILA_SLOT1_NOMBRE, 3).clearContent();
+  hoja.getRange(GEN_FILA_SLOT2_NOMBRE, 3).clearContent();
 
-    const evento = obtenerEventos_().find((e) => e.id === idEventoCargado);
-    const dias = fechasEntreServidor_(evento.inicio, evento.fin);
-    const ultimaFila = obtenerUltimaFilaPanel_(hoja);
-    const filaNueva = ultimaFila + 1;
-    const indice = filaNueva - PANEL_FILA_PRIMER_EMPLEADO + 1;
-
-    hoja.showColumns(PANEL_COL_ID_ASIGNACION, 2);
-    hoja.getRange(filaNueva, 1, 1, 6).setValues([[indice, asignacion.id, idEmpleado, asignacion.empleado, asignacion.puesto, asignacion.tarifaAcordada]]);
-
-    dias.forEach((fechaIso, indiceDia) => {
-      const color = SYHME.PALETA_DIAS[indiceDia % SYHME.PALETA_DIAS.length];
-      const colBase = PANEL_COL_DIAS_INICIO + indiceDia * 4;
-      PANEL_TIPOS_TURNO.forEach((tipo, indiceTipo) => {
-        const celda = hoja.getRange(filaNueva, colBase + indiceTipo);
-        celda.insertCheckboxes();
-        celda.setValue(false);
-        celda.setBackground(color.fondo);
-      });
-    });
-
-    const colTotalTurnos = PANEL_COL_DIAS_INICIO + dias.length * 4;
-    hoja.getRange(filaNueva, colTotalTurnos).setValue(0);
-    hoja.getRange(filaNueva, colTotalTurnos + 1).setValue(0).setNumberFormat('_-"$"* #,##0.00_-;_-"$"* \\-#,##0.00_-;_-"$"* "-"??_-;_-@');
-
-    hoja.hideColumns(PANEL_COL_ID_ASIGNACION, 2);
-    hoja.getRange(PANEL_FILA_AGREGAR, 2).clearContent();
-
-    SpreadsheetApp.getActive().toast(`${asignacion.empleado} agregado a la tabla.`, 'Syhme', 5);
-  } catch (error) {
-    SpreadsheetApp.getUi().alert(error.message || 'No fue posible agregar el empleado.');
-  } finally {
-    lock.releaseLock();
-  }
+  generadorActualizarEvento_(hoja);
+  SpreadsheetApp.getActive().toast(agregados > 0 ? `${agregados} empleado(s) agregado(s) al evento.` : 'No había empleados que agregar.', 'Syhme', 5);
 }
 
-function panelGuardarTurnos_() {
-  const libro = SpreadsheetApp.getActiveSpreadsheet();
-  const hoja = obtenerHojaObligatoria_(libro, SYHME.HOJAS.PANEL);
-  const idEventoCargado = String(hoja.getRange(PANEL_CELDA_EVENTO_CARGADO).getValue() || '').trim();
-  const idEventoSeleccionado = parseIdDesdeCeldaPanel_(hoja.getRange(PANEL_FILA_EVENTO, 2).getValue());
+function generadorCrearNomina_(hoja) {
+  const idEvento = String(hoja.getRange(GEN_CELDA_EVENTO_ACTUAL).getValue() || '').trim();
+  if (!idEvento) { SpreadsheetApp.getUi().alert('Selecciona un evento en C5.'); return; }
 
-  if (!idEventoCargado || idEventoCargado !== idEventoSeleccionado) {
-    SpreadsheetApp.getUi().alert('Primero usa "Cargar evento" para este evento.');
-    return;
-  }
-
-  const lock = LockService.getDocumentLock();
-  if (!lock.tryLock(25000)) { SpreadsheetApp.getUi().alert('El sistema está ocupado. Intenta nuevamente.'); return; }
-
-  try {
-    const evento = obtenerEventos_().find((e) => e.id === idEventoCargado);
-    if (!evento) { SpreadsheetApp.getUi().alert('El evento cargado ya no existe.'); return; }
-
-    const dias = fechasEntreServidor_(evento.inicio, evento.fin);
-    const hojaTurnos = obtenerHojaObligatoria_(libro, SYHME.HOJAS.TURNOS);
-    const turnosExistentes = obtenerTurnos_().filter((t) => t.idEvento === idEventoCargado);
-    const colTotalTurnos = PANEL_COL_DIAS_INICIO + dias.length * 4;
-    const ultimaFila = obtenerUltimaFilaPanel_(hoja);
-
-    let empleadosActualizados = 0;
-
-    for (let fila = PANEL_FILA_PRIMER_EMPLEADO; fila <= ultimaFila; fila++) {
-      const idAsignacion = String(hoja.getRange(fila, PANEL_COL_ID_ASIGNACION).getValue());
-      const idEmpleado = String(hoja.getRange(fila, PANEL_COL_ID_EMPLEADO).getValue());
-      const nombre = String(hoja.getRange(fila, PANEL_COL_NOMBRE).getValue());
-      const tarifa = Number(hoja.getRange(fila, PANEL_COL_TARIFA).getValue()) || 0;
-      if (!idAsignacion) continue;
-
-      let totalTurnos = 0;
-
-      dias.forEach((fechaIso, indiceDia) => {
-        const colBase = PANEL_COL_DIAS_INICIO + indiceDia * 4;
-        const valoresDia = hoja.getRange(fila, colBase, 1, 4).getValues()[0];
-        let tipoElegido = '';
-        for (let t = 0; t < 4; t++) {
-          if (valoresDia[t] === true) { tipoElegido = PANEL_TIPOS_TURNO[t]; break; }
-        }
-        const fraccion = SYHME.FRACCIONES_TURNO[tipoElegido] || 0;
-        totalTurnos += fraccion;
-
-        const existente = turnosExistentes.find((t) => t.idAsignacion === idAsignacion && t.fecha === fechaIso);
-        if (existente) {
-          hojaTurnos.getRange(existente.fila, 8, 1, 2).setValues([[tipoElegido, fraccion]]);
-        } else if (tipoElegido) {
-          const nuevoId = generarId_('TUR', hojaTurnos);
-          hojaTurnos.appendRow([nuevoId, idEventoCargado, evento.nombre, idAsignacion, idEmpleado, nombre, fechaDesdeIso_(fechaIso), tipoElegido, fraccion, '']);
-        }
-      });
-
-      const subtotal = tarifa * totalTurnos;
-      hoja.getRange(fila, colTotalTurnos).setValue(totalTurnos);
-      hoja.getRange(fila, colTotalTurnos + 1).setValue(subtotal);
-      empleadosActualizados++;
-    }
-
-    registrarBitacora_({
-      modulo: 'TURNOS', accion: 'CAPTURA_PANEL', idRegistro: idEventoCargado,
-      valorNuevo: JSON.stringify({ evento: evento.nombre, empleados: empleadosActualizados }),
-      detalle: 'Turnos guardados desde el Panel.',
-    });
-
-    SpreadsheetApp.getActive().toast(`Turnos guardados para ${empleadosActualizados} empleado(s).`, 'Syhme', 5);
-  } catch (error) {
-    SpreadsheetApp.getUi().alert(error.message || 'No fue posible guardar los turnos.');
-  } finally {
-    lock.releaseLock();
-  }
-}
-
-function panelGenerarNomina_() {
-  const libro = SpreadsheetApp.getActiveSpreadsheet();
-  const hoja = obtenerHojaObligatoria_(libro, SYHME.HOJAS.PANEL);
-  const idEvento = parseIdDesdeCeldaPanel_(hoja.getRange(PANEL_FILA_EVENTO, 2).getValue());
-  if (!idEvento) { SpreadsheetApp.getUi().alert('Selecciona un evento en la celda B3.'); return; }
-
-  const lock = LockService.getDocumentLock();
-  if (!lock.tryLock(25000)) { SpreadsheetApp.getUi().alert('El sistema está ocupado. Intenta nuevamente.'); return; }
-
-  let resultado;
-  try {
-    resultado = generarNominaEvento_(idEvento);
-  } finally {
-    lock.releaseLock();
-  }
-
+  const resultado = generarNominaEvento_(idEvento);
   SpreadsheetApp.getUi().alert(resultado.mensaje);
 }
 
-/* ======================= FIN PANEL ======================= */
+function generadorCancelarNomina_(hoja) {
+  const idEvento = String(hoja.getRange(GEN_CELDA_EVENTO_ACTUAL).getValue() || '').trim();
+  if (!idEvento) { SpreadsheetApp.getUi().alert('Selecciona un evento en C5.'); return; }
+
+  const resultado = eliminarNominaCompleta_(idEvento);
+  SpreadsheetApp.getUi().alert(resultado.mensaje);
+}
+
+function generadorGuardarTurnoCelda_(hoja, fila, columna) {
+  const idEvento = String(hoja.getRange(GEN_CELDA_EVENTO_ACTUAL).getValue() || '').trim();
+  const evento = obtenerEventos_().find((e) => e.id === idEvento);
+  if (!evento) return;
+
+  const dias = fechasEntreServidor_(evento.inicio, evento.fin);
+  const indiceDia = Math.floor((columna - GEN_COL_TURNOS_INICIO) / 4);
+  const indiceTipo = (columna - GEN_COL_TURNOS_INICIO) % 4;
+  const fechaIso = dias[indiceDia];
+  if (!fechaIso) return;
+
+  const nombreFila = String(hoja.getRange(fila, 2).getValue() || '').trim();
+  const asignacion = obtenerAsignacionesActivasPorEvento_(idEvento).find((a) => claveTexto_(a.empleado) === claveTexto_(nombreFila));
+  if (!asignacion) return;
+
+  const colBase = GEN_COL_TURNOS_INICIO + indiceDia * 4;
+  const valores = hoja.getRange(fila, colBase, 1, 4).getValues()[0];
+  const marcado = valores[indiceTipo] === true;
+
+  if (marcado) {
+    for (let t = 0; t < 4; t++) {
+      if (t !== indiceTipo && valores[t] === true) hoja.getRange(fila, colBase + t).setValue(false);
+    }
+  }
+
+  const tipoElegido = marcado ? SYHME.TIPOS_TURNO[indiceTipo] : '';
+  const libro = SpreadsheetApp.getActiveSpreadsheet();
+  const hojaTurnos = obtenerHojaObligatoria_(libro, SYHME.HOJAS.TURNOS);
+  guardarTurnosParaAsignacion_(hojaTurnos, evento, asignacion, [{ fecha: fechaIso, tipo: tipoElegido }]);
+}
+
+function abrirCatalogoEmpleados_desdeGenerador_() { abrirCatalogoEmpleados(); }
+
+/* ======================= FIN GENERADOR ======================= */
 
 function verificarEstructura() {
   const libro = SpreadsheetApp.getActiveSpreadsheet();
@@ -2516,6 +2442,18 @@ function generarId_(prefijo, hoja) {
   return `${prefijo}-${String(maximo + 1).padStart(5, '0')}`;
 }
 
+function fechasEntreServidor_(inicioIso, finIso) {
+  const dias = [];
+  let actual = fechaDesdeIso_(inicioIso);
+  const fin = fechaDesdeIso_(finIso);
+  if (!actual || !fin) return dias;
+  while (actual <= fin) {
+    dias.push(formatearFechaIso_(actual));
+    actual = new Date(actual.getFullYear(), actual.getMonth(), actual.getDate() + 1, 12);
+  }
+  return dias;
+}
+
 function registrarBitacora_({ modulo, accion, idRegistro, valorAnterior = '', valorNuevo = '', detalle = '' }) {
   const libro = SpreadsheetApp.getActiveSpreadsheet();
   const hoja = obtenerHojaObligatoria_(libro, SYHME.HOJAS.BITACORA);
@@ -2557,20 +2495,56 @@ function claveTexto_(valor) {
 function onEdit(e) {
   try {
     const hoja = e.range.getSheet();
-    if (hoja.getName() !== SYHME.HOJAS.VISTA_NOMINA) return;
-    if (e.range.getRow() !== VISTA_FILA_SELECTOR || e.range.getColumn() !== 2) return;
+    const nombreHoja = hoja.getName();
+    const fila = e.range.getRow();
+    const columna = e.range.getColumn();
 
-    const valorCelda = String(e.range.getValue() || '').trim();
-    const idEvento = valorCelda.split('—')[0].trim();
-    if (!idEvento) return;
+    if (nombreHoja === SYHME.HOJAS.VISTA_NOMINA) {
+      if (fila !== VISTA_FILA_SELECTOR || columna !== 2) return;
+      const idEvento = generadorParseId_(e.range.getValue());
+      if (!idEvento) return;
+      const lock = LockService.getDocumentLock();
+      if (!lock.tryLock(20000)) return;
+      try { generarVistaNominaEvento_(idEvento); } finally { lock.releaseLock(); }
+      return;
+    }
 
-    const lock = LockService.getDocumentLock();
-    if (!lock.tryLock(20000)) return;
-
-    try {
-      generarVistaNominaEvento_(idEvento);
-    } finally {
-      lock.releaseLock();
+    if (nombreHoja === SYHME.HOJAS.GENERADOR) {
+      const lock = LockService.getDocumentLock();
+      if (!lock.tryLock(20000)) return;
+      try {
+        if (fila === GEN_FILA_EVENTO && columna === 3) {
+          generadorActualizarEvento_(hoja);
+          return;
+        }
+        if (fila === GEN_FILA_TRIGGER_ASIGNAR && columna === GEN_COL_TRIGGER_ASIGNAR) {
+          if (e.range.getValue() === true) {
+            generadorAgregarAsignaciones_(hoja);
+            e.range.setValue(false);
+          }
+          return;
+        }
+        if (fila === GEN_FILA_TRIGGER_CREAR && columna === GEN_COL_TRIGGER_CREAR) {
+          if (e.range.getValue() === true) {
+            generadorCrearNomina_(hoja);
+            e.range.setValue(false);
+          }
+          return;
+        }
+        if (fila === GEN_FILA_TRIGGER_CANCELAR && columna === GEN_COL_TRIGGER_CANCELAR) {
+          if (e.range.getValue() === true) {
+            generadorCancelarNomina_(hoja);
+            e.range.setValue(false);
+          }
+          return;
+        }
+        if (fila >= GEN_FILA_PRIMER_EMPLEADO_GRID && columna >= GEN_COL_TURNOS_INICIO) {
+          generadorGuardarTurnoCelda_(hoja, fila, columna);
+          return;
+        }
+      } finally {
+        lock.releaseLock();
+      }
     }
   } catch (error) {
     // Silencioso: un error aquí no debe interrumpir la edición normal de la hoja.
