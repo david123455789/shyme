@@ -78,12 +78,15 @@ function onOpen() {
     .addItem('Abrir Vista Nómina', 'abrirVistaNomina')
     .addSeparator()
     .addItem('Abrir Generador', 'abrirGenerador')
+        .addItem('Abrir Menú', 'abrirMenu')
+            .addItem('Agregar documentos', 'mostrarFormularioAgregarDocumentos')
     .addItem('Actualizar Generador ahora', 'generadorForzarActualizacion')
     .addSeparator()
     .addSubMenu(menuAbrir)
     .addSeparator()
     .addItem('Actualizar estatus de eventos ahora', 'actualizarEstatusEventos_')
     .addItem('Activar actualización diaria automática', 'instalarActualizacionDiariaEventos')
+    .addItem('Activar edición avanzada (checkboxes con formularios)', 'instalarTriggerEdicionAvanzada')
     .addItem('Verificar estructura', 'verificarEstructura')
     .addToUi();
 }
@@ -411,6 +414,147 @@ function crearOEncontrarCarpetaEvento_(idEvento, nombreEvento) {
   const carpeta = existentes.hasNext() ? existentes.next() : raiz.createFolder(nombreCarpeta);
   return carpeta.getUrl();
 }
+function obtenerCarpetaEventoComoFolder_(idEvento, nombreEvento) {
+  const raiz = obtenerCarpetaRaizEventos_();
+  const nombreCarpeta = normalizarNombreCarpeta_(`${idEvento} - ${nombreEvento}`);
+  const existentes = raiz.getFoldersByName(nombreCarpeta);
+  return existentes.hasNext() ? existentes.next() : raiz.createFolder(nombreCarpeta);
+}
+
+function mostrarFormularioAgregarDocumentos() {
+  const eventos = obtenerEventos_();
+  if (!eventos.length) {
+    SpreadsheetApp.getUi().alert('No hay eventos registrados todavía.');
+    return;
+  }
+
+  const datos = JSON.stringify({ eventos }).replace(/</g, '\\u003c');
+
+  const html = HtmlService.createHtmlOutput(`
+    <!doctype html><html><head><base target="_top"><style>${estilosFormulario_()}
+      #listaArchivos{margin-top:10px;font-size:12px;color:#37474f}
+      #listaArchivos div{padding:3px 0;border-bottom:1px solid #eceff1;display:flex;justify-content:space-between}
+      input[type="file"]{padding:8px 0}
+      .estado-ok{color:#1b5e20;font-weight:700}
+      .estado-error{color:#b71c1c;font-weight:700}
+      .estado-pendiente{color:#78909c}
+    </style></head><body>
+      <h2>Agregar documentos</h2>
+      <p>Selecciona el evento y elige uno o varios archivos (imágenes, PDF, etc.). Se guardarán automáticamente en la carpeta de Drive de ese evento, uno por uno.</p>
+      <form id="formulario">
+        <label for="idEvento">Evento</label>
+        <select id="idEvento" required></select>
+        <label for="archivos">Archivos</label>
+        <input id="archivos" type="file" multiple required>
+        <div id="listaArchivos"></div>
+        <div id="mensaje"></div>
+        <div class="acciones"><button type="button" class="secundario" onclick="google.script.host.close()">Cerrar</button><button id="guardar" class="primario">Subir documentos</button></div>
+      </form>
+      <script>
+        const datos=${datos},q=id=>document.getElementById(id),se=q('idEvento'),inputArchivos=q('archivos'),lista=q('listaArchivos');
+        datos.eventos.forEach(x=>{const o=document.createElement('option');o.value=x.id;o.textContent=x.id+' — '+x.nombre+' — '+x.inicio;se.appendChild(o)});
+
+        function pintarLista(archivos, estados){
+          lista.innerHTML='';
+          archivos.forEach((f,i)=>{
+            const d=document.createElement('div');
+            const nombre=document.createElement('span');nombre.textContent=f.name+' ('+Math.round(f.size/1024)+' KB)';
+            const estado=document.createElement('span');
+            estado.className='estado-'+(estados[i]||'pendiente');
+            estado.textContent=estados[i]==='ok'?'✓':estados[i]==='error'?'✗':'…';
+            d.appendChild(nombre);d.appendChild(estado);
+            lista.appendChild(d);
+          });
+        }
+
+        inputArchivos.addEventListener('change',()=>{
+          const archivos=[...inputArchivos.files];
+          pintarLista(archivos, archivos.map(()=>'pendiente'));
+        });
+
+        function archivoABase64(file){
+          return new Promise((resolve,reject)=>{
+            const lector=new FileReader();
+            lector.onload=()=>resolve(lector.result.split(',')[1]);
+            lector.onerror=reject;
+            lector.readAsDataURL(file);
+          });
+        }
+
+        function subirUno(idEvento, nombre, tipo, base64){
+          return new Promise((resolve,reject)=>{
+            google.script.run
+              .withSuccessHandler(resolve)
+              .withFailureHandler(reject)
+              .guardarUnDocumentoEvento({idEvento, nombre, tipo, base64});
+          });
+        }
+
+        q('formulario').onsubmit=async e=>{
+          e.preventDefault();
+          const archivos=[...inputArchivos.files];
+          if(!archivos.length){q('mensaje').className='error';q('mensaje').textContent='Selecciona al menos un archivo.';return}
+          q('guardar').disabled=true;
+          const estados=archivos.map(()=>'pendiente');
+          pintarLista(archivos, estados);
+
+          let exitosos=0, fallidos=0;
+          for(let i=0;i<archivos.length;i++){
+            q('mensaje').className='';q('mensaje').textContent='Subiendo '+(i+1)+' de '+archivos.length+'...';
+            try{
+              const base64=await archivoABase64(archivos[i]);
+              const r=await subirUno(se.value, archivos[i].name, archivos[i].type||'application/octet-stream', base64);
+              estados[i]=r&&r.ok?'ok':'error';
+              if(r&&r.ok){exitosos++}else{fallidos++}
+                      }catch(err){
+              estados[i]='error';fallidos++;
+              q('mensaje').className='error';
+              q('mensaje').textContent='Error: '+(err&&err.message?err.message:JSON.stringify(err));
+              pintarLista(archivos, estados);
+              await new Promise(r=>setTimeout(r,50));
+            }
+            pintarLista(archivos, estados);
+          }
+
+          q('guardar').disabled=false;
+          q('mensaje').className=fallidos===0?'ok':'error';
+          q('mensaje').textContent=exitosos+' archivo(s) subido(s) correctamente'+(fallidos?', '+fallidos+' fallaron.':'.');
+        };
+      </script>
+    </body></html>
+  `).setWidth(500).setHeight(600);
+  SpreadsheetApp.getUi().showModalDialog(html, 'Syhme');
+}
+
+function guardarUnDocumentoEvento(datos) {
+  const idEvento = String((datos && datos.idEvento) || '').trim();
+  const nombre = String((datos && datos.nombre) || 'documento').trim();
+  const tipo = String((datos && datos.tipo) || 'application/octet-stream').trim();
+  const base64 = String((datos && datos.base64) || '');
+
+  if (!idEvento) return { ok: false, mensaje: 'Selecciona un evento.' };
+  if (!base64) return { ok: false, mensaje: 'Archivo vacío.' };
+
+  const evento = obtenerEventos_().find((e) => e.id === idEvento);
+  if (!evento) return { ok: false, mensaje: 'El evento seleccionado ya no existe.' };
+
+  try {
+    const carpeta = obtenerCarpetaEventoComoFolder_(idEvento, evento.nombre);
+    const bytes = Utilities.base64Decode(base64);
+    const blob = Utilities.newBlob(bytes, tipo, nombre);
+    carpeta.createFile(blob);
+
+    registrarBitacora_({
+      modulo: 'EVENTOS', accion: 'DOCUMENTO_SUBIDO', idRegistro: idEvento,
+      valorNuevo: JSON.stringify({ evento: evento.nombre, archivo: nombre }),
+      detalle: 'Documento subido a la carpeta del evento desde el formulario.',
+    });
+
+    return { ok: true, mensaje: `${nombre} guardado.` };
+  } catch (error) {
+    return { ok: false, mensaje: error.message || `No fue posible subir ${nombre}.` };
+  }
+}
 
 function formulaCarpeta_(url) {
   return `=HYPERLINK("${url}","Carpeta")`;
@@ -507,6 +651,23 @@ function instalarActualizacionDiariaEventos() {
 
   ScriptApp.newTrigger('actualizarEstatusEventos_').timeBased().everyDays(1).atHour(1).create();
   SpreadsheetApp.getActive().toast('Actualización diaria de estatus activada.', 'Syhme', 5);
+}
+
+function instalarTriggerEdicionAvanzada() {
+  ScriptApp.getProjectTriggers()
+    .filter((t) => t.getHandlerFunction() === 'manejarEdicionHoja')
+    .forEach((t) => ScriptApp.deleteTrigger(t));
+
+  ScriptApp.newTrigger('manejarEdicionHoja')
+    .forSpreadsheet(SpreadsheetApp.getActive())
+    .onEdit()
+    .create();
+
+  SpreadsheetApp.getActive().toast(
+    'Edición avanzada activada. Los checkboxes que abren formularios (como Nuevo Préstamo) ya deberían funcionar.',
+    'Syhme',
+    6
+  );
 }
 
 /* ======================= FIN EVENTOS ======================= */
@@ -1954,10 +2115,12 @@ function generarVistaNominaEvento_(idEvento) {
     return Object.assign({}, a, { orden: puesto ? puesto.orden : 999 });
   }).sort((x, y) => x.orden - y.orden || x.empleado.localeCompare(y.empleado, 'es'));
 
+  // TABLA 1 (Resumen/Detalle de nómina/Pago/Reparto): columnas 1 a anchoBase, ancho libre.
+  // TABLA 2 (Turnos por empleado): columnas independientes desde colInicioGrid, ancho fijo angosto.
+  // Nunca comparten columna, así que cada una se ajusta a su propio contenido sin afectar a la otra.
   const anchoBase = 8;
-  const colInicioGrid = 2; // los turnos arrancan pegados, justo después del nombre
-  const ultimaColumnaGrid = dias.length ? (colInicioGrid - 1 + dias.length) : anchoBase;
-  const anchoGridTotal = Math.max(anchoBase, ultimaColumnaGrid);
+  const colInicioGrid = anchoBase + 1;
+  const anchoGridTotal = dias.length ? (colInicioGrid - 1 + dias.length) : anchoBase;
 
   let fila = VISTA_FILA_INICIO_REPORTE;
 
@@ -1989,7 +2152,7 @@ function generarVistaNominaEvento_(idEvento) {
     const encabezados = [['Empleado', 'Puesto', 'Tarifa', 'Turnos', 'Subtotal', 'Préstamo', 'Total a pagar', 'Estatus']];
     const rangoEncabezados = hoja.getRange(fila, 1, 1, anchoBase);
     rangoEncabezados.setValues(encabezados);
-    estiloRangoVista_(rangoEncabezados, '#666666', '#ffffff', true, 9, true);
+    estiloRangoVista_(rangoEncabezados, '#666666', '#ffffff', true, 9, false);
     fila++;
 
     const filaDatosInicio = fila;
@@ -2004,7 +2167,7 @@ function generarVistaNominaEvento_(idEvento) {
       hoja.getRange(fila, 8).setValue(String(d.estatusPago || ''));
       fila++;
     });
-    estiloRangoVista_(hoja.getRange(filaDatosInicio, 1, detalle.length, anchoBase), '#ffffff', '#000000', false, 9, true);
+    estiloRangoVista_(hoja.getRange(filaDatosInicio, 1, detalle.length, anchoBase), '#ffffff', '#000000', false, 9, false);
 
     hoja.getRange(fila, 1, 1, 6).merge().setValue('Total nómina');
     hoja.getRange(fila, 7).setValue(`=SUM(G${filaDatosInicio}:G${fila - 1})`);
@@ -2024,8 +2187,11 @@ function generarVistaNominaEvento_(idEvento) {
     const nombresDias = ['Domingo', 'Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado'];
     const filaEncabezadoTurnos = fila;
 
-    const celdaEncabezadoEmpleado = hoja.getRange(filaEncabezadoTurnos, 1);
-    celdaEncabezadoEmpleado.setValue('Empleado');
+    // El nombre de "Empleado" y de cada trabajador se fusiona en TODAS las columnas
+    // de la tabla de nómina (1 a anchoBase), para que quede pegado, sin hueco, justo
+    // antes de que empiecen los días en su propia columna.
+    const celdaEncabezadoEmpleado = hoja.getRange(filaEncabezadoTurnos, 1, 1, anchoBase);
+    celdaEncabezadoEmpleado.merge().setValue('Empleado');
     estiloRangoVista_(celdaEncabezadoEmpleado, '#666666', '#ffffff', true, 9, false);
 
     dias.forEach((fechaIso, indiceDia) => {
@@ -2039,8 +2205,8 @@ function generarVistaNominaEvento_(idEvento) {
     fila++;
 
     asignacionesOrdenadas.forEach((a) => {
-      const celdaNombre = hoja.getRange(fila, 1);
-      celdaNombre.setValue(`${a.empleado} (${a.puesto})`);
+      const celdaNombre = hoja.getRange(fila, 1, 1, anchoBase);
+      celdaNombre.merge().setValue(`${a.empleado} (${a.puesto})`);
       estiloRangoVista_(celdaNombre, '#ffffff', '#000000', true, 9, false);
 
       dias.forEach((fechaIso, indiceDia) => {
@@ -2131,19 +2297,14 @@ function generarVistaNominaEvento_(idEvento) {
     estiloRangoVista_(hoja.getRange(filaControlInicio, 1, fila - filaControlInicio, anchoBase), '#f0f3f4', '#000000', false, 10, false);
   }
 
-  // Columna A (nombres): se ajusta sola a su contenido más largo.
-  hoja.autoResizeColumn(1);
+  // TABLA 1 (columnas 1-anchoBase): se ajusta sola a su contenido más largo ("COORDINADOR", montos, etc.)
+  hoja.autoResizeColumns(1, anchoBase);
   hoja.setColumnWidth(1, Math.max(hoja.getColumnWidth(1), 170));
 
-  // Columnas 2 en adelante: SIEMPRE angostas y fijas (70px), tanto para los turnos
-  // como para "Puesto"/montos de la tabla de nómina (que usan wrap para no desbordarse).
-  const ultimaColumnaTotal = Math.max(anchoBase, ultimaColumnaGrid);
-  if (ultimaColumnaTotal >= 2) {
-    hoja.setColumnWidths(2, ultimaColumnaTotal - 1, 70);
+  // TABLA 2 (columnas colInicioGrid en adelante): siempre angosta y fija, independiente de la Tabla 1.
+  if (dias.length) {
+    hoja.setColumnWidths(colInicioGrid, dias.length, 45);
   }
-
-  // Ajusta la altura de cada fila para que el texto envuelto (wrap) se vea completo.
-  hoja.autoResizeRows(VISTA_FILA_INICIO_REPORTE, fila - VISTA_FILA_INICIO_REPORTE);
 
   hoja.setFrozenRows(VISTA_FILA_INICIO_REPORTE - 1);
   libro.setActiveSheet(hoja);
@@ -2172,8 +2333,10 @@ const GEN_FILA_SLOT1_NOMBRE = 24;
 const GEN_FILA_SLOT1_PUESTO = 26;
 const GEN_FILA_SLOT2_NOMBRE = 30;
 const GEN_FILA_SLOT2_PUESTO = 33;
-const GEN_FILA_TRIGGER_ASIGNAR = 24;
-const GEN_COL_TRIGGER_ASIGNAR = 6; // F24
+const GEN_FILA_TRIGGER_PRESTAMO = 10;
+const GEN_COL_TRIGGER_PRESTAMO = 1; // A10
+const GEN_FILA_TRIGGER_ASIGNAR = 29;
+const GEN_COL_TRIGGER_ASIGNAR = 1; // A29
 const GEN_FILA_TRIGGER_CREAR = 39;
 const GEN_COL_TRIGGER_CREAR = 2; // B39
 const GEN_FILA_TRIGGER_CANCELAR = 39;
@@ -2182,6 +2345,51 @@ const GEN_FILA_ENCABEZADO_GRID = 42;
 const GEN_FILA_PRIMER_EMPLEADO_GRID = 43;
 const GEN_COL_TURNOS_INICIO = 4; // D
 const GEN_CELDA_EVENTO_ACTUAL = 'Z1';
+const MENU_HOJA_NOMBRE = 'Menú';
+const MENU_FILA_EMPLEADOS_PUESTOS = 3;
+const MENU_COL_EMPLEADOS_PUESTOS = 1; // A (celda combinada A3:B3)
+const MENU_FILA_ADMINISTRAR = 3;
+const MENU_COL_ADMINISTRAR = 3; // C (celda combinada C3:D3)
+const MENU_FILA_PAGOS_CONTROL = 3;
+const MENU_COL_PAGOS_CONTROL = 5; // E (celda combinada E3:F3)
+const MENU_FILA_ABRIR = 3;
+const MENU_COL_ABRIR = 7; // G (celda combinada G3:H3)
+
+function abrirMenu() {
+  const libro = SpreadsheetApp.getActiveSpreadsheet();
+  const hoja = obtenerHojaObligatoria_(libro, MENU_HOJA_NOMBRE);
+  menuAsegurarDropdowns_(hoja);
+  libro.setActiveSheet(hoja);
+}
+
+function menuAsegurarDropdowns_(hoja) {
+  const opcionesEmpleadosPuestos = ['Dar de alta empleado', 'Administrar puestos y tarifas'];
+  const celdaEP = hoja.getRange(MENU_FILA_EMPLEADOS_PUESTOS, MENU_COL_EMPLEADOS_PUESTOS);
+  celdaEP.clearDataValidations();
+  celdaEP.setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(opcionesEmpleadosPuestos, true).setAllowInvalid(false).build());
+
+  const opcionesAdministrar = ['Administrar clientes', 'Administrar eventos', 'Administrar cotizaciones'];
+  const celdaAdmin = hoja.getRange(MENU_FILA_ADMINISTRAR, MENU_COL_ADMINISTRAR);
+  celdaAdmin.clearDataValidations();
+  celdaAdmin.setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(opcionesAdministrar, true).setAllowInvalid(false).build());
+
+  const opcionesPagosControl = ['Administrar pagos de cliente', 'Generar control financiero'];
+  const celdaPagos = hoja.getRange(MENU_FILA_PAGOS_CONTROL, MENU_COL_PAGOS_CONTROL);
+  celdaPagos.clearDataValidations();
+  celdaPagos.setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(opcionesPagosControl, true).setAllowInvalid(false).build());
+
+  const opcionesAbrir = [
+    'Catálogo de empleados', 'Catálogo de puestos', 'Catálogo de clientes', 'Catálogo de eventos',
+    'Catálogo de cotizaciones', 'Catálogo de asignaciones', 'Catálogo de turnos', 'Catálogo de nóminas',
+    'Catálogo de detalle de nómina', 'Catálogo de préstamos', 'Catálogo de movimientos de préstamo',
+    'Catálogo de pagos', 'Catálogo de control financiero',
+  ];
+  const celdaAbrir = hoja.getRange(MENU_FILA_ABRIR, MENU_COL_ABRIR);
+  celdaAbrir.clearDataValidations();
+  celdaAbrir.setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(opcionesAbrir, true).setAllowInvalid(false).build());
+}
+
+
 
 function abrirGenerador() {
   const libro = SpreadsheetApp.getActiveSpreadsheet();
@@ -2221,21 +2429,38 @@ function generadorRefrescarListas_(hoja) {
 }
 
 function generadorAsegurarTriggers_(hoja) {
+  const opcionesCrear = ['▶ Generar nómina'];
+  const opcionesCancelar = ['✖ Cancelar nómina'];
+
+  const prestamo = hoja.getRange(GEN_FILA_TRIGGER_PRESTAMO, GEN_COL_TRIGGER_PRESTAMO);
+  prestamo.clearDataValidations();
+  prestamo.insertCheckboxes();
+  prestamo.setValue(false);
+
+  const etiquetaPrestamo = hoja.getRange(GEN_FILA_TRIGGER_PRESTAMO, GEN_COL_TRIGGER_PRESTAMO + 1);
+  etiquetaPrestamo.setValue('Nuevo Préstamo').setFontWeight('bold').setFontColor('#1155cc');
+
   const asignar = hoja.getRange(GEN_FILA_TRIGGER_ASIGNAR, GEN_COL_TRIGGER_ASIGNAR);
-  if (asignar.getDataValidation() === null) {
-    asignar.insertCheckboxes();
-    hoja.getRange(GEN_FILA_TRIGGER_ASIGNAR - 1, GEN_COL_TRIGGER_ASIGNAR).setValue('✅ Agregar asignaciones').setFontWeight('bold').setFontSize(9);
-  }
+  asignar.clearDataValidations();
+  asignar.insertCheckboxes();
+  asignar.setValue(false);
+
+  const etiquetaAsignar = hoja.getRange(GEN_FILA_TRIGGER_ASIGNAR, GEN_COL_TRIGGER_ASIGNAR + 1);
+  etiquetaAsignar.setValue('Agregar Empleados').setFontWeight('bold').setFontColor('#1155cc');
+
   const crear = hoja.getRange(GEN_FILA_TRIGGER_CREAR, GEN_COL_TRIGGER_CREAR);
-  if (crear.getDataValidation() === null) {
-    crear.insertCheckboxes();
-    crear.setNote('Marca esta casilla para crear o regenerar la nómina del evento cargado.');
-  }
+  crear.clearDataValidations();
+  crear.setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(opcionesCrear, true).setAllowInvalid(false).build());
+  crear.setValue(opcionesCrear[0]);
+  crear.setBackground('#1b5e20').setFontColor('#ffffff').setFontWeight('bold').setHorizontalAlignment('center');
+  crear.setNote('Haz clic y selecciona la opción para crear o regenerar la nómina del evento cargado.');
+
   const cancelar = hoja.getRange(GEN_FILA_TRIGGER_CANCELAR, GEN_COL_TRIGGER_CANCELAR);
-  if (cancelar.getDataValidation() === null) {
-    cancelar.insertCheckboxes();
-    cancelar.setNote('Marca esta casilla para cancelar y eliminar la nómina del evento cargado.');
-  }
+  cancelar.clearDataValidations();
+  cancelar.setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(opcionesCancelar, true).setAllowInvalid(false).build());
+  cancelar.setValue(opcionesCancelar[0]);
+  cancelar.setBackground('#b71c1c').setFontColor('#ffffff').setFontWeight('bold').setHorizontalAlignment('center');
+  cancelar.setNote('Haz clic y selecciona la opción para cancelar y eliminar la nómina del evento cargado.');
 }
 
 function generadorParseId_(valor) {
@@ -2571,7 +2796,7 @@ function claveTexto_(valor) {
     .replace(/[\u0300-\u036f]/g, '');
 }
 
-function onEdit(e) {
+function manejarEdicionHoja(e) {
   try {
     const hoja = e.range.getSheet();
     const nombreHoja = hoja.getName();
@@ -2596,25 +2821,29 @@ function onEdit(e) {
           generadorActualizarEvento_(hoja);
           return;
         }
+        if (fila === GEN_FILA_TRIGGER_PRESTAMO && columna === GEN_COL_TRIGGER_PRESTAMO) {
+          const marcado = e.range.getValue() === true;
+          e.range.setValue(false);
+          if (marcado) {
+            mostrarFormularioPrestamos();
+          }
+          return;
+        }
         if (fila === GEN_FILA_TRIGGER_ASIGNAR && columna === GEN_COL_TRIGGER_ASIGNAR) {
           if (e.range.getValue() === true) {
             generadorAgregarAsignaciones_(hoja);
-            e.range.setValue(false);
           }
+          e.range.setValue(false);
           return;
         }
         if (fila === GEN_FILA_TRIGGER_CREAR && columna === GEN_COL_TRIGGER_CREAR) {
-          if (e.range.getValue() === true) {
-            generadorCrearNomina_(hoja);
-            e.range.setValue(false);
-          }
+          generadorCrearNomina_(hoja);
+          e.range.setValue('▶ Generar nómina');
           return;
         }
         if (fila === GEN_FILA_TRIGGER_CANCELAR && columna === GEN_COL_TRIGGER_CANCELAR) {
-          if (e.range.getValue() === true) {
-            generadorCancelarNomina_(hoja);
-            e.range.setValue(false);
-          }
+          generadorCancelarNomina_(hoja);
+          e.range.setValue('✖ Cancelar nómina');
           return;
         }
         if (fila >= GEN_FILA_PRIMER_EMPLEADO_GRID && columna >= GEN_COL_TURNOS_INICIO) {
@@ -2626,6 +2855,7 @@ function onEdit(e) {
       }
       return;
     }
+
 
     if (nombreHoja === SYHME.HOJAS.ASIGNACIONES) {
       const libro = SpreadsheetApp.getActiveSpreadsheet();
@@ -2641,6 +2871,62 @@ function onEdit(e) {
         lock.releaseLock();
       }
       return;
+    }
+          if (nombreHoja === MENU_HOJA_NOMBRE) {
+      if (fila === MENU_FILA_EMPLEADOS_PUESTOS && columna === MENU_COL_EMPLEADOS_PUESTOS) {
+        const valor = String(e.range.getValue() || '').trim();
+        e.range.setValue('');
+        if (valor === 'Dar de alta empleado') {
+          mostrarFormularioAltaEmpleado();
+        } else if (valor === 'Administrar puestos y tarifas') {
+          mostrarFormularioPuestos();
+        }
+        return;
+      }
+      if (fila === MENU_FILA_ADMINISTRAR && columna === MENU_COL_ADMINISTRAR) {
+        const valor = String(e.range.getValue() || '').trim();
+        e.range.setValue('');
+        if (valor === 'Administrar clientes') {
+          mostrarFormularioClientes();
+        } else if (valor === 'Administrar eventos') {
+          mostrarFormularioEventos();
+        } else if (valor === 'Administrar cotizaciones') {
+          mostrarFormularioCotizaciones();
+        }
+        return;
+      }
+      if (fila === MENU_FILA_PAGOS_CONTROL && columna === MENU_COL_PAGOS_CONTROL) {
+        const valor = String(e.range.getValue() || '').trim();
+        e.range.setValue('');
+        if (valor === 'Administrar pagos de cliente') {
+          mostrarFormularioPagos();
+        } else if (valor === 'Generar control financiero') {
+          mostrarFormularioControlFinanciero();
+        }
+        return;
+      }
+      if (fila === MENU_FILA_ABRIR && columna === MENU_COL_ABRIR) {
+        const valor = String(e.range.getValue() || '').trim();
+        e.range.setValue('');
+        const mapaAbrir = {
+          'Catálogo de empleados': abrirCatalogoEmpleados,
+          'Catálogo de puestos': abrirCatalogoPuestos,
+          'Catálogo de clientes': abrirCatalogoClientes,
+          'Catálogo de eventos': abrirCatalogoEventos,
+          'Catálogo de cotizaciones': abrirCatalogoCotizaciones,
+          'Catálogo de asignaciones': abrirCatalogoAsignaciones,
+          'Catálogo de turnos': abrirCatalogoTurnos,
+          'Catálogo de nóminas': abrirCatalogoNominas,
+          'Catálogo de detalle de nómina': abrirCatalogoDetalleNomina,
+          'Catálogo de préstamos': abrirCatalogoPrestamos,
+          'Catálogo de movimientos de préstamo': abrirCatalogoMovimientosPrestamo,
+          'Catálogo de pagos': abrirCatalogoPagos,
+          'Catálogo de control financiero': abrirCatalogoControlFinanciero,
+        };
+        const funcionAbrir = mapaAbrir[valor];
+        if (funcionAbrir) funcionAbrir();
+        return;
+      }
     }
   } catch (error) {
     // Silencioso: un error aquí no debe interrumpir la edición normal de la hoja.
