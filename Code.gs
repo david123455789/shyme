@@ -78,9 +78,10 @@ function onOpen() {
     .addItem('Abrir Vista Nómina', 'abrirVistaNomina')
     .addSeparator()
     .addItem('Abrir Generador', 'abrirGenerador')
-        .addItem('Abrir Menú', 'abrirMenu')
-            .addItem('Agregar documentos', 'mostrarFormularioAgregarDocumentos')
+    .addItem('Abrir Menú', 'abrirMenu')
+    .addItem('Agregar documentos', 'mostrarFormularioAgregarDocumentos')
     .addItem('Actualizar Generador ahora', 'generadorForzarActualizacion')
+    .addItem('Limpiar residuos del Generador', 'generadorLimpiarResiduos')
     .addSeparator()
     .addSubMenu(menuAbrir)
     .addSeparator()
@@ -2366,17 +2367,17 @@ function menuAsegurarDropdowns_(hoja) {
   const opcionesEmpleadosPuestos = ['Dar de alta empleado', 'Administrar puestos y tarifas'];
   const celdaEP = hoja.getRange(MENU_FILA_EMPLEADOS_PUESTOS, MENU_COL_EMPLEADOS_PUESTOS);
   celdaEP.clearDataValidations();
-  celdaEP.setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(opcionesEmpleadosPuestos, true).setAllowInvalid(false).build());
+  celdaEP.setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(opcionesEmpleadosPuestos, true).setAllowInvalid(true).build());
 
-  const opcionesAdministrar = ['Administrar clientes', 'Administrar eventos', 'Administrar cotizaciones'];
+  const opcionesAdministrar = ['Administrar clientes', 'Administrar eventos', 'Administrar cotizaciones', 'Agregar documentos'];
   const celdaAdmin = hoja.getRange(MENU_FILA_ADMINISTRAR, MENU_COL_ADMINISTRAR);
   celdaAdmin.clearDataValidations();
-  celdaAdmin.setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(opcionesAdministrar, true).setAllowInvalid(false).build());
+  celdaAdmin.setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(opcionesAdministrar, true).setAllowInvalid(true).build());
 
   const opcionesPagosControl = ['Administrar pagos de cliente', 'Generar control financiero'];
   const celdaPagos = hoja.getRange(MENU_FILA_PAGOS_CONTROL, MENU_COL_PAGOS_CONTROL);
   celdaPagos.clearDataValidations();
-  celdaPagos.setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(opcionesPagosControl, true).setAllowInvalid(false).build());
+  celdaPagos.setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(opcionesPagosControl, true).setAllowInvalid(true).build());
 
   const opcionesAbrir = [
     'Catálogo de empleados', 'Catálogo de puestos', 'Catálogo de clientes', 'Catálogo de eventos',
@@ -2386,7 +2387,7 @@ function menuAsegurarDropdowns_(hoja) {
   ];
   const celdaAbrir = hoja.getRange(MENU_FILA_ABRIR, MENU_COL_ABRIR);
   celdaAbrir.clearDataValidations();
-  celdaAbrir.setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(opcionesAbrir, true).setAllowInvalid(false).build());
+  celdaAbrir.setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(opcionesAbrir, true).setAllowInvalid(true).build());
 }
 
 
@@ -2503,15 +2504,48 @@ function generadorActualizarEvento_(hoja) {
   generadorConstruirGrid_(hoja, idEvento);
 }
 
+/**
+ * CORRECCIÓN: la limpieza ahora empieza en GEN_FILA_ENCABEZADO_GRID - 1 (la fila donde
+ * se escriben las etiquetas de días). Antes empezaba una fila más abajo, así que las
+ * fechas del evento anterior nunca se borraban y se encimaban con las nuevas.
+ * El breakApart() deshace los merges de 4 columnas de los días anteriores, necesario
+ * al pasar de un evento largo a uno más corto.
+ */
 function generadorLimpiarGrid_(hoja) {
   const maxFilas = hoja.getMaxRows();
   const maxColumnas = hoja.getMaxColumns();
-  hoja.getRange(GEN_FILA_ENCABEZADO_GRID, 1, maxFilas - GEN_FILA_ENCABEZADO_GRID + 1, maxColumnas)
-    .clearContent().clearFormat().clearDataValidations();
+  const filaInicio = GEN_FILA_ENCABEZADO_GRID - 1;
+
+  const rango = hoja.getRange(filaInicio, 1, maxFilas - filaInicio + 1, maxColumnas);
+  rango.breakApart();
+  rango.clearContent().clearFormat().clearDataValidations();
+
   hoja.getRange(GEN_FILA_ENCABEZADO_GRID, 1).setValue('Indice');
   hoja.getRange(GEN_FILA_ENCABEZADO_GRID, 2).setValue('Nombre');
   hoja.getRange(GEN_FILA_ENCABEZADO_GRID, 3).setValue('Puesto');
   hoja.getRange(GEN_FILA_ENCABEZADO_GRID, 1, 1, 3).setFontWeight('bold');
+}
+
+/**
+ * Borra de una sola vez el residuo que quedó entre los botones y la cuadrícula
+ * (botones y fechas duplicados de una versión anterior del layout).
+ * Ejecutar desde el menú Syhme una vez; después ya no se vuelve a acumular.
+ */
+function generadorLimpiarResiduos() {
+  const libro = SpreadsheetApp.getActiveSpreadsheet();
+  const hoja = obtenerHojaObligatoria_(libro, SYHME.HOJAS.GENERADOR);
+
+  const desde = GEN_FILA_TRIGGER_CREAR + 1;
+  const hasta = GEN_FILA_ENCABEZADO_GRID - 2;
+  if (hasta >= desde) {
+    const rango = hoja.getRange(desde, 1, hasta - desde + 1, hoja.getMaxColumns());
+    rango.breakApart();
+    rango.clearContent().clearFormat().clearDataValidations();
+  }
+
+  generadorAsegurarTriggers_(hoja);
+  generadorActualizarEvento_(hoja);
+  SpreadsheetApp.getActive().toast('Generador limpiado.', 'Syhme', 4);
 }
 
 function generadorConstruirGrid_(hoja, idEvento) {
@@ -2892,6 +2926,8 @@ function manejarEdicionHoja(e) {
           mostrarFormularioEventos();
         } else if (valor === 'Administrar cotizaciones') {
           mostrarFormularioCotizaciones();
+        } else if (valor === 'Agregar documentos') {
+          mostrarFormularioAgregarDocumentos();
         }
         return;
       }
